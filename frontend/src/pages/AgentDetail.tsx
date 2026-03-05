@@ -2276,6 +2276,9 @@ export default function AgentDetail() {
                                                         <li>{t('channelGuide.slack.step3')}</li>
                                                         <li>{t('channelGuide.slack.step4')}</li>
                                                         <li>{t('channelGuide.slack.step5')}</li>
+                                                        <li>{t('channelGuide.slack.step6')}</li>
+                                                        <li>{t('channelGuide.slack.step7')}</li>
+                                                        <li>{t('channelGuide.slack.step8')}</li>
                                                     </ol>
                                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>💡 {t('channelGuide.slack.note')}</div>
                                                 </details>
@@ -2301,6 +2304,9 @@ export default function AgentDetail() {
                                                         <li>{t('channelGuide.slack.step3')}</li>
                                                         <li>{t('channelGuide.slack.step4')}</li>
                                                         <li>{t('channelGuide.slack.step5')}</li>
+                                                        <li>{t('channelGuide.slack.step6')}</li>
+                                                        <li>{t('channelGuide.slack.step7')}</li>
+                                                        <li>{t('channelGuide.slack.step8')}</li>
                                                     </ol>
                                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>💡 {t('channelGuide.slack.note')}</div>
                                                 </details>
@@ -2344,6 +2350,7 @@ export default function AgentDetail() {
                                                         <li>{t('channelGuide.discord.step4')}</li>
                                                         <li>{t('channelGuide.discord.step5')}</li>
                                                         <li>{t('channelGuide.discord.step6')}</li>
+                                                        <li>{t('channelGuide.discord.step7')}</li>
                                                     </ol>
                                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>💡 {t('channelGuide.discord.note')}</div>
                                                 </details>
@@ -2374,6 +2381,7 @@ export default function AgentDetail() {
                                                         <li>{t('channelGuide.discord.step4')}</li>
                                                         <li>{t('channelGuide.discord.step5')}</li>
                                                         <li>{t('channelGuide.discord.step6')}</li>
+                                                        <li>{t('channelGuide.discord.step7')}</li>
                                                     </ol>
                                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>💡 {t('channelGuide.discord.note')}</div>
                                                 </details>
@@ -2413,11 +2421,14 @@ export default function AgentDetail() {
                                                         <button
                                                             title="Copy"
                                                             style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginLeft: '6px', padding: '1px 4px', cursor: 'pointer', borderRadius: '3px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-secondary)', verticalAlign: 'middle', lineHeight: 1 }}
-                                                            onClick={() => {
+                                                            onClick={(e) => {
                                                                 const url = webhookData?.webhook_url || `${window.location.origin}/api/channel/feishu/${id}/webhook`;
                                                                 navigator.clipboard.writeText(url).then(() => {
-                                                                    const btn = document.activeElement as HTMLButtonElement;
-                                                                    if (btn) { const origHtml = btn.innerHTML; btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="13 2 5 10 2 7"/></svg>'; setTimeout(() => { btn.innerHTML = origHtml; }, 1500); }
+                                                                    const btn = e.currentTarget as HTMLButtonElement;
+                                                                    const origHtml = btn.innerHTML;
+                                                                    btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="13 2 5 10 2 7"/></svg>';
+                                                                    btn.style.color = 'rgb(16,185,129)';
+                                                                    setTimeout(() => { btn.innerHTML = origHtml; btn.style.color = ''; }, 1500);
                                                                 });
                                                             }}
                                                         >
@@ -2438,6 +2449,9 @@ export default function AgentDetail() {
                                                         <li>{t('channelGuide.feishu.step3')}</li>
                                                         <li>{t('channelGuide.feishu.step4')}</li>
                                                         <li>{t('channelGuide.feishu.step5')}</li>
+                                                        <li>{t('channelGuide.feishu.step6')}</li>
+                                                        <li>{t('channelGuide.feishu.step7')}</li>
+                                                        <li>{t('channelGuide.feishu.step8')}</li>
                                                     </ol>
                                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>💡 {t('channelGuide.feishu.note')}</div>
                                                 </details>
@@ -2469,6 +2483,9 @@ export default function AgentDetail() {
                                                         <li>{t('channelGuide.feishu.step3')}</li>
                                                         <li>{t('channelGuide.feishu.step4')}</li>
                                                         <li>{t('channelGuide.feishu.step5')}</li>
+                                                        <li>{t('channelGuide.feishu.step6')}</li>
+                                                        <li>{t('channelGuide.feishu.step7')}</li>
+                                                        <li>{t('channelGuide.feishu.step8')}</li>
                                                     </ol>
                                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>💡 {t('channelGuide.feishu.note')}</div>
                                                 </details>

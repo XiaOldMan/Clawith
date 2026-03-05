@@ -417,6 +417,9 @@ export default function AgentCreate() {
                                                 <li>{t('channelGuide.slack.step3')}</li>
                                                 <li>{t('channelGuide.slack.step4')}</li>
                                                 <li>{t('channelGuide.slack.step5')}</li>
+                                                <li>{t('channelGuide.slack.step6')}</li>
+                                                <li>{t('channelGuide.slack.step7')}</li>
+                                                <li>{t('channelGuide.slack.step8')}</li>
                                             </ol>
                                             <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>💡 {t('channelGuide.slack.note')}</div>
                                         </details>
@@ -466,6 +469,7 @@ export default function AgentCreate() {
                                                 <li>{t('channelGuide.discord.step4')}</li>
                                                 <li>{t('channelGuide.discord.step5')}</li>
                                                 <li>{t('channelGuide.discord.step6')}</li>
+                                                <li>{t('channelGuide.discord.step7')}</li>
                                             </ol>
                                             <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>💡 {t('channelGuide.discord.note')}</div>
                                         </details>
@@ -528,6 +532,9 @@ export default function AgentCreate() {
                                                 <li>{t('channelGuide.feishu.step3')}</li>
                                                 <li>{t('channelGuide.feishu.step4')}</li>
                                                 <li>{t('channelGuide.feishu.step5')}</li>
+                                                <li>{t('channelGuide.feishu.step6')}</li>
+                                                <li>{t('channelGuide.feishu.step7')}</li>
+                                                <li>{t('channelGuide.feishu.step8')}</li>
                                             </ol>
                                             <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>💡 {t('channelGuide.feishu.note')}</div>
                                         </details>
