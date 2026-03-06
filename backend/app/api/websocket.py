@@ -342,15 +342,17 @@ async def websocket_chat(
     websocket: WebSocket,
     agent_id: uuid.UUID,
     token: str = Query(...),
+    session_id: str = Query(None),
 ):
     """WebSocket endpoint for real-time chat with an agent.
 
     Flow:
-    1. Client connects with JWT token as query param
+    1. Client connects with JWT token + optional session_id as query params
     2. Server authenticates and checks agent access
-    3. Client sends messages as JSON: {"content": "..."}
-    4. Server calls the agent's configured LLM and sends response back
-    5. Messages are persisted to chat_messages table
+    3. If session_id provided, uses it; otherwise finds/creates the user's latest session
+    4. Client sends messages as JSON: {"content": "..."}
+    5. Server calls the agent's configured LLM and sends response back
+    6. Messages are persisted to chat_messages table under the session
     """
     # Authenticate
     try:
@@ -391,8 +393,47 @@ async def websocket_chat(
                 llm_model = model_result.scalar_one_or_none()
                 print(f"[WS] Model loaded: {llm_model.model if llm_model else 'None'}")
 
-            # Load recent chat history for context (non-fatal if fails)
-            conv_id = f"web_{user_id}"
+            # Resolve or create chat session
+            from app.models.chat_session import ChatSession
+            from sqlalchemy import select as _sel
+            from datetime import datetime as _dt, timezone as _tz
+            conv_id = session_id
+            if conv_id:
+                # Validate the session belongs to this agent
+                _sr = await db.execute(
+                    _sel(ChatSession).where(
+                        ChatSession.id == uuid.UUID(conv_id),
+                        ChatSession.agent_id == agent_id,
+                    )
+                )
+                _existing = _sr.scalar_one_or_none()
+                if not _existing:
+                    conv_id = None  # fall through to create
+            if not conv_id:
+                # Find most recent session for this user+agent
+                _sr = await db.execute(
+                    _sel(ChatSession)
+                    .where(ChatSession.agent_id == agent_id, ChatSession.user_id == user_id)
+                    .order_by(ChatSession.last_message_at.desc().nulls_last(), ChatSession.created_at.desc())
+                    .limit(1)
+                )
+                _latest = _sr.scalar_one_or_none()
+                if _latest:
+                    conv_id = str(_latest.id)
+                else:
+                    # Create a default session
+                    now = _dt.now(_tz.utc)
+                    _new_session = ChatSession(
+                        agent_id=agent_id, user_id=user_id,
+                        title=f"Session {now.strftime('%m-%d %H:%M')}",
+                        created_at=now,
+                    )
+                    db.add(_new_session)
+                    await db.commit()
+                    await db.refresh(_new_session)
+                    conv_id = str(_new_session.id)
+                    print(f"[WS] Created default session {conv_id}")
+
             try:
                 history_result = await db.execute(
                     select(ChatMessage)
@@ -401,7 +442,7 @@ async def websocket_chat(
                     .limit(20)
                 )
                 history_messages = list(reversed(history_result.scalars().all()))
-                print(f"[WS] Loaded {len(history_messages)} history messages")
+                print(f"[WS] Loaded {len(history_messages)} history messages for session {conv_id}")
             except Exception as e:
                 print(f"[WS] History load failed (non-fatal): {e}")
     except Exception as e:
@@ -467,6 +508,18 @@ async def websocket_chat(
                     conversation_id=conv_id,
                 )
                 db.add(user_msg)
+                # Update session last_message_at + auto-title on first message
+                from app.models.chat_session import ChatSession as _CS
+                from datetime import datetime as _dt2, timezone as _tz2
+                _now = _dt2.now(_tz2.utc)
+                _sess_r = await db.execute(
+                    select(_CS).where(_CS.id == uuid.UUID(conv_id))
+                )
+                _sess = _sess_r.scalar_one_or_none()
+                if _sess:
+                    _sess.last_message_at = _now
+                    if not history_messages and _sess.title.startswith("Session "):
+                        _sess.title = content[:40]
                 await db.commit()
             print("[WS] User message saved")
 

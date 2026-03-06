@@ -502,17 +502,61 @@ export default function AgentDetail() {
     });
 
     // Chat history
-    const { data: conversations = [] } = useQuery({
-        queryKey: ['chat-conversations', id],
-        queryFn: () => fetchAuth<any[]>(`/agents/${id}/chat-history/conversations`),
-        enabled: !!id && activeTab === 'chat',
-    });
-    const [selectedConv, setSelectedConv] = useState<string | null>('me');
-    const { data: convMessages = [] } = useQuery({
-        queryKey: ['chat-messages', id, selectedConv],
-        queryFn: () => fetchAuth<any[]>(`/agents/${id}/chat-history/${selectedConv}`),
-        enabled: !!id && !!selectedConv && selectedConv !== 'me',
-    });
+    // ── Session state (replaces old conversations query) ──────────────────
+    const [sessions, setSessions] = useState<any[]>([]);
+    const [allSessions, setAllSessions] = useState<any[]>([]);
+    const [activeSession, setActiveSession] = useState<any | null>(null);
+    const [chatScope, setChatScope] = useState<'mine' | 'all'>('mine');
+    const [historyMsgs, setHistoryMsgs] = useState<any[]>([]);
+    const [sessionsLoading, setSessionsLoading] = useState(false);
+
+    const fetchMySessions = async () => {
+        if (!id) return;
+        setSessionsLoading(true);
+        try {
+            const tkn = localStorage.getItem('token');
+            const res = await fetch(`/api/agents/${id}/sessions?scope=mine`, { headers: { Authorization: `Bearer ${tkn}` } });
+            if (res.ok) { const data = await res.json(); setSessions(data); return data; }
+        } catch { }
+        setSessionsLoading(false);
+        return [];
+    };
+
+    const fetchAllSessions = async () => {
+        if (!id) return;
+        try {
+            const tkn = localStorage.getItem('token');
+            const res = await fetch(`/api/agents/${id}/sessions?scope=all`, { headers: { Authorization: `Bearer ${tkn}` } });
+            if (res.ok) setAllSessions(await res.json());
+        } catch { }
+    };
+
+    const createNewSession = async () => {
+        const tkn = localStorage.getItem('token');
+        const res = await fetch(`/api/agents/${id}/sessions`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tkn}` },
+            body: JSON.stringify({}),
+        });
+        if (res.ok) {
+            const newSess = await res.json();
+            setSessions(prev => [newSess, ...prev]);
+            setChatMessages([]);
+            setHistoryMsgs([]);
+            setActiveSession(newSess);
+        }
+    };
+
+    const selectSession = async (sess: any) => {
+        setChatMessages([]);
+        setHistoryMsgs([]);
+        setActiveSession(sess);
+        // If it's not the live session (different user), load messages statically
+        if (sess.user_id !== currentUser?.id) {
+            const tkn = localStorage.getItem('token');
+            const res = await fetch(`/api/agents/${id}/sessions/${sess.id}/messages`, { headers: { Authorization: `Bearer ${tkn}` } });
+            if (res.ok) setHistoryMsgs(await res.json());
+        }
+    };
 
     // Websocket chat state (for 'me' conversation)
     const token = useAuthStore((s) => s.token);
@@ -620,67 +664,63 @@ export default function AgentDetail() {
 
     useEffect(() => {
         if (!id || !token || activeTab !== 'chat') return;
+        // Load sessions when entering chat tab
+        fetchMySessions().then((data: any) => {
+            setSessionsLoading(false);
+            if (data && data.length > 0 && !activeSession) setActiveSession(data[0]);
+        });
+    }, [id, activeTab]);
+
+    useEffect(() => {
+        if (!id || !token || activeTab !== 'chat') return;
+        if (!activeSession) return;  // wait for session to be set
+        // Only connect WS for own sessions
+        if (activeSession.user_id && currentUser && activeSession.user_id !== String(currentUser.id)) return;
         let cancelled = false;
+        const sessionParam = activeSession?.id ? `&session_id=${activeSession.id}` : '';
         const connect = () => {
             if (cancelled) return;
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat/${id}?token=${token}`);
+            const ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat/${id}?token=${token}${sessionParam}`);
             ws.onopen = () => { if (cancelled) { ws.close(); return; } setWsConnected(true); wsRef.current = ws; };
             ws.onclose = () => { if (!cancelled) { setWsConnected(false); setTimeout(connect, 2000); } };
             ws.onerror = () => { if (!cancelled) setWsConnected(false); };
             ws.onmessage = (e) => {
                 const d = JSON.parse(e.data);
                 if (d.type === 'tool_call') {
-                    // Tool call notification from backend
                     setChatMessages(prev => {
-                        const toolMsg: ChatMsg = {
-                            role: 'tool_call',
-                            content: '',
-                            toolName: d.name,
-                            toolArgs: d.args,
-                            toolStatus: d.status,
-                            toolResult: d.result,
-                        };
-                        // If updating an existing running tool_call for the same tool, replace it
+                        const toolMsg: ChatMsg = { role: 'tool_call', content: '', toolName: d.name, toolArgs: d.args, toolStatus: d.status, toolResult: d.result };
                         if (d.status === 'done') {
                             const lastIdx = prev.length - 1;
                             const last = prev[lastIdx];
-                            if (last && last.role === 'tool_call' && last.toolName === d.name && last.toolStatus === 'running') {
-                                return [...prev.slice(0, lastIdx), toolMsg];
-                            }
+                            if (last && last.role === 'tool_call' && last.toolName === d.name && last.toolStatus === 'running') return [...prev.slice(0, lastIdx), toolMsg];
                         }
                         return [...prev, toolMsg];
                     });
                 } else if (d.type === 'chunk') {
-                    // Streaming chunk — append to last message or create new one
                     setChatMessages(prev => {
                         const last = prev[prev.length - 1];
-                        if (last && last.role === 'assistant' && (last as any)._streaming) {
-                            return [...prev.slice(0, -1), { role: 'assistant', content: last.content + d.content, _streaming: true } as any];
-                        }
+                        if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), { role: 'assistant', content: last.content + d.content, _streaming: true } as any];
                         return [...prev, { role: 'assistant', content: d.content, _streaming: true } as any];
                     });
                 } else if (d.type === 'done') {
-                    // Streaming done — replace with final content
                     setChatMessages(prev => {
                         const last = prev[prev.length - 1];
-                        if (last && last.role === 'assistant' && (last as any)._streaming) {
-                            return [...prev.slice(0, -1), { role: 'assistant', content: d.content }];
-                        }
+                        if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), { role: 'assistant', content: d.content }];
                         return [...prev, { role: d.role, content: d.content }];
                     });
+                    // Refresh session list to update last_message_at
+                    fetchMySessions();
                 } else if (d.type === 'error' || d.type === 'quota_exceeded') {
-                    // Quota / expiry / system error — show as styled system message
                     setChatMessages(prev => [...prev, { role: 'assistant', content: `⚠️ ${d.content || d.detail || d.message || 'Request denied'}` }]);
                 } else {
-                    // Legacy non-streaming message
                     setChatMessages(prev => [...prev, { role: d.role, content: d.content }]);
                 }
             };
         };
         connect();
         return () => { cancelled = true; wsRef.current?.close(); wsRef.current = null; setWsConnected(false); };
-    }, [id, token, activeTab]);
+    }, [id, token, activeTab, activeSession?.id]);
 
     // Smart scroll: only auto-scroll if user is at the bottom
     const isNearBottom = useRef(true);
@@ -1670,193 +1710,189 @@ export default function AgentDetail() {
                 })()}
 
                 {activeTab === 'chat' && (
-                    <div>
-                        <h3 style={{ marginBottom: '12px' }}>{t('agent.chat.title')}</h3>
-                        <div style={{ display: 'flex', gap: '12px', flex: 1, minHeight: 0, height: 'calc(100vh - 280px)' }}>
-                            {/* Left: conversation list */}
-                            <div style={{ width: '240px', flexShrink: 0, borderRight: '1px solid var(--border-subtle)', paddingRight: '12px', overflowY: 'auto' }}>
-                                {/* Pinned: live chat with me */}
-                                <div
-                                    onClick={() => setSelectedConv('me')}
-                                    style={{ padding: '10px', borderRadius: '8px', cursor: 'pointer', marginBottom: '8px', background: selectedConv === 'me' ? 'var(--bg-elevated)' : 'rgba(224,238,238,0.08)', border: selectedConv === 'me' ? '1px solid var(--accent-primary)' : '1px solid rgba(224,238,238,0.2)' }}
-                                >
-                                    <div style={{ fontWeight: 600, fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                        <span className={`status-dot ${wsConnected ? 'running' : 'stopped'}`} style={{ width: '6px', height: '6px' }} />
-                                        {t('agent.actions.talkToMe')}
-                                    </div>
-                                    <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{wsConnected ? t('agent.chat.connected') : t('agent.chat.disconnected')} · {chatMessages.length} 条</div>
-                                </div>
-                                {conversations.length > 0 && <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', padding: '4px 10px', fontWeight: 600 }}>History</div>}
-                                {conversations.map((c: any) => (
-                                    <div key={c.conv_id}
-                                        onClick={() => setSelectedConv(c.conv_id)}
-                                        style={{ padding: '8px 10px', borderRadius: '8px', cursor: 'pointer', marginBottom: '2px', background: selectedConv === c.conv_id ? 'var(--bg-elevated)' : 'transparent', border: selectedConv === c.conv_id ? '1px solid var(--accent-primary)' : '1px solid transparent' }}
-                                        onMouseEnter={e => { if (selectedConv !== c.conv_id) e.currentTarget.style.background = 'var(--bg-secondary)'; }}
-                                        onMouseLeave={e => { if (selectedConv !== c.conv_id) e.currentTarget.style.background = 'transparent'; }}
-                                    >
-                                        <div style={{ fontWeight: 500, fontSize: '12px', marginBottom: '1px' }}>{c.partner_name}</div>
-                                        <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.last_message}</div>
-                                        <div style={{ fontSize: '9px', color: 'var(--text-tertiary)', marginTop: '1px' }}>{c.message_count}  · {c.last_at ? new Date(c.last_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}</div>
-                                    </div>
-                                ))}
+                    <div style={{ display: 'flex', gap: '0', flex: 1, minHeight: 0, height: 'calc(100vh - 240px)', borderTop: '1px solid var(--border-subtle)', marginTop: '8px' }}>
+                        {/* ── Left: session sidebar ── */}
+                        <div style={{ width: '220px', flexShrink: 0, borderRight: '1px solid var(--border-subtle)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                            {/* Tab row */}
+                            <div style={{ display: 'flex', alignItems: 'center', padding: '10px 12px 0', gap: '4px', borderBottom: '1px solid var(--border-subtle)' }}>
+                                <button onClick={() => setChatScope('mine')}
+                                    style={{ flex: 1, padding: '5px 0', background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: chatScope === 'mine' ? 600 : 400, color: chatScope === 'mine' ? 'var(--text-primary)' : 'var(--text-tertiary)', borderBottom: chatScope === 'mine' ? '2px solid var(--accent-primary)' : '2px solid transparent', paddingBottom: '8px' }}>
+                                    My Sessions
+                                </button>
+                                {isAdmin && (
+                                    <button onClick={() => { setChatScope('all'); fetchAllSessions(); }}
+                                        style={{ flex: 1, padding: '5px 0', background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: chatScope === 'all' ? 600 : 400, color: chatScope === 'all' ? 'var(--text-primary)' : 'var(--text-tertiary)', borderBottom: chatScope === 'all' ? '2px solid var(--accent-primary)' : '2px solid transparent', paddingBottom: '8px' }}>
+                                        All Users
+                                    </button>
+                                )}
                             </div>
-                            {/* Right: chat area */}
-                            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative', minWidth: 0, overflow: 'hidden' }}>
-                                {selectedConv === 'me' ? (
-                                    /* Live websocket chat */
-                                    <>
-                                        <div ref={chatContainerRef} onScroll={handleChatScroll} style={{ flex: 1, overflowY: 'auto', padding: '4px' }}>
-                                            {chatMessages.length === 0 && (
-                                                <div style={{ textAlign: 'center', padding: '60px', color: 'var(--text-tertiary)' }}>
-                                                    <div style={{ marginBottom: '8px', color: 'var(--text-tertiary)', fontSize: '13px' }}>{t('agent.chat.startChat')}</div>
-                                                    <div style={{ fontSize: '13px' }}>{t('agent.chat.startConversation', { name: agent.name })}</div>
-                                                    <div style={{ fontSize: '11px', marginTop: '4px', opacity: 0.7 }}>{t('agent.chat.fileSupport')}</div>
+
+                            {/* Actions row */}
+                            {chatScope === 'mine' && (
+                                <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-subtle)' }}>
+                                    <button onClick={createNewSession}
+                                        style={{ width: '100%', padding: '5px 8px', background: 'none', border: '1px solid var(--border-subtle)', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', color: 'var(--text-secondary)', textAlign: 'left', display: 'flex', alignItems: 'center', gap: '6px' }}
+                                        onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-secondary)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+                                        onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.color = 'var(--text-secondary)'; }}>
+                                        + New Session
+                                    </button>
+                                </div>
+                            )}
+
+                            {/* Session list */}
+                            <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
+                                {chatScope === 'mine' ? (
+                                    sessionsLoading ? (
+                                        <div style={{ padding: '20px 12px', fontSize: '12px', color: 'var(--text-tertiary)' }}>{t('common.loading')}</div>
+                                    ) : sessions.length === 0 ? (
+                                        <div style={{ padding: '20px 12px', fontSize: '12px', color: 'var(--text-tertiary)' }}>No sessions yet.<br />Click "+ New Session" to start.</div>
+                                    ) : sessions.map((s: any) => {
+                                        const isActive = activeSession?.id === s.id;
+                                        const isOwn = s.user_id === String(currentUser?.id);
+                                        return (
+                                            <div key={s.id} onClick={() => selectSession(s)}
+                                                style={{ padding: '8px 12px', cursor: 'pointer', borderLeft: isActive ? '2px solid var(--accent-primary)' : '2px solid transparent', background: isActive ? 'var(--bg-secondary)' : 'transparent', marginBottom: '1px' }}
+                                                onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'var(--bg-secondary)'; }}
+                                                onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}>
+                                                <div style={{ fontSize: '12px', fontWeight: isActive ? 600 : 400, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: '2px' }}>{s.title}</div>
+                                                <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                    {isOwn && isActive && wsConnected && <span className="status-dot running" style={{ width: '5px', height: '5px', flexShrink: 0 }} />}
+                                                    {s.last_message_at ? new Date(s.last_message_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : new Date(s.created_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric' })}
+                                                    {s.message_count > 0 && <span style={{ marginLeft: 'auto' }}>{s.message_count}</span>}
                                                 </div>
-                                            )}
-                                            {chatMessages.map((msg, i) => {
-                                                if (msg.role === 'tool_call') {
+                                            </div>
+                                        );
+                                    })
+                                ) : (
+                                    /* All Users tab — grouped by user */
+                                    (() => {
+                                        const grouped: Record<string, any[]> = {};
+                                        for (const s of allSessions) {
+                                            const k = s.username || s.user_id;
+                                            (grouped[k] = grouped[k] || []).push(s);
+                                        }
+                                        return Object.entries(grouped).map(([username, userSessions]) => (
+                                            <div key={username}>
+                                                <div style={{ padding: '6px 12px 2px', fontSize: '10px', color: 'var(--text-tertiary)', fontWeight: 600, letterSpacing: '0.02em', textTransform: 'uppercase' }}>{username}</div>
+                                                {userSessions.map((s: any) => {
+                                                    const isActive = activeSession?.id === s.id;
                                                     return (
-                                                        <div key={i} style={{ display: 'flex', gap: '8px', marginBottom: '6px', paddingLeft: '36px' }}>
-                                                            <details style={{
-                                                                flex: 1, borderRadius: '8px',
-                                                                background: 'var(--accent-subtle)',
-                                                                border: '1px solid var(--accent-subtle)',
-                                                                fontSize: '12px',
-                                                            }}>
-                                                                <summary style={{
-                                                                    padding: '6px 10px', cursor: 'pointer',
-                                                                    display: 'flex', alignItems: 'center', gap: '6px',
-                                                                    userSelect: 'none', listStyle: 'none',
-                                                                }}>
-                                                                    <span style={{ fontSize: '13px' }}>{msg.toolStatus === 'running' ? '⏳' : '⚡'}</span>
-                                                                    <span style={{ fontWeight: 600, color: 'var(--accent-text)' }}>{msg.toolName}</span>
-                                                                    {msg.toolArgs && Object.keys(msg.toolArgs).length > 0 && (
-                                                                        <span style={{ color: 'var(--text-tertiary)', fontSize: '11px', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-                                                                            {`(${Object.entries(msg.toolArgs).map(([k, v]) => `${k}: ${typeof v === 'string' ? v.slice(0, 30) : JSON.stringify(v)}`).join(', ')})`}
-                                                                        </span>
-                                                                    )}
-                                                                    {msg.toolStatus === 'running' && <span style={{ color: 'var(--text-tertiary)', fontSize: '11px', marginLeft: 'auto' }}>{t('common.loading')}</span>}
-                                                                </summary>
-                                                                {msg.toolResult && (
-                                                                    <div style={{ padding: '4px 10px 8px' }}>
-                                                                        <div style={{ color: 'var(--text-secondary)', fontSize: '11px', fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '240px', overflow: 'auto', background: 'rgba(0,0,0,0.15)', borderRadius: '4px', padding: '4px 6px' }}>
-                                                                            {msg.toolResult}
-                                                                        </div>
-                                                                    </div>
-                                                                )}
-                                                            </details>
+                                                        <div key={s.id} onClick={() => selectSession(s)}
+                                                            style={{ padding: '6px 12px', cursor: 'pointer', borderLeft: isActive ? '2px solid var(--accent-primary)' : '2px solid transparent', background: isActive ? 'var(--bg-secondary)' : 'transparent' }}
+                                                            onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'var(--bg-secondary)'; }}
+                                                            onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}>
+                                                            <div style={{ fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>{s.title}</div>
+                                                            <div style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>
+                                                                {s.last_message_at ? new Date(s.last_message_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}
+                                                                {s.message_count > 0 && ` · ${s.message_count}`}
+                                                            </div>
                                                         </div>
                                                     );
-                                                }
-                                                return (
-                                                    <div key={i} style={{ display: 'flex', flexDirection: msg.role === 'assistant' ? 'row' : 'row-reverse', gap: '8px', marginBottom: '8px' }}>
-                                                        <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: msg.role === 'assistant' ? 'rgba(224,238,238,0.15)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', flexShrink: 0 }}>
-                                                            {msg.role === 'user' ? 'U' : 'A'}
-                                                        </div>
-                                                        <div style={{ maxWidth: '70%', padding: '8px 12px', borderRadius: '12px', background: msg.role === 'assistant' ? 'var(--bg-secondary)' : 'rgba(224,238,238,0.15)', fontSize: '13px', lineHeight: '1.5', wordBreak: 'break-word' }}>
-                                                            {msg.fileName && <div style={{ fontSize: '10px', color: 'var(--accent)', marginBottom: '2px' }}>⌇ {msg.fileName}</div>}
-                                                            {msg.role === 'assistant' ? <MarkdownRenderer content={msg.content} /> : <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>}
-                                                        </div>
-                                                    </div>
-                                                );
-                                            })}
-                                            <div ref={chatEndRef} />
-                                        </div>
-                                        {showScrollBtn && (
-                                            <button
-                                                onClick={scrollToBottom}
-                                                style={{
-                                                    position: 'absolute', bottom: '70px', right: '20px',
-                                                    width: '32px', height: '32px', borderRadius: '50%',
-                                                    background: 'var(--bg-elevated)', border: '1px solid var(--border-default)',
-                                                    color: 'var(--text-secondary)', cursor: 'pointer',
-                                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                    fontSize: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
-                                                    zIndex: 10,
-                                                }}
-                                                title="Scroll to bottom"
-                                            >↓</button>
-                                        )}
-                                        {attachedFile && (
-                                            <div style={{ padding: '4px 12px', background: 'var(--bg-elevated)', borderTop: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px' }}>
-                                                <span>⌇ {attachedFile.name}</span>
-                                                <button onClick={() => setAttachedFile(null)} style={{ background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer' }}>✕</button>
+                                                })}
+                                            </div>
+                                        ));
+                                    })()
+                                )}
+                            </div>
+                        </div>
+
+                        {/* ── Right: chat/message area ── */}
+                        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative', minWidth: 0, overflow: 'hidden' }}>
+                            {!activeSession ? (
+                                <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-tertiary)', fontSize: '13px', flexDirection: 'column', gap: '8px' }}>
+                                    <div>No session selected</div>
+                                    <button className="btn btn-secondary" onClick={createNewSession} style={{ fontSize: '12px' }}>Start a new session</button>
+                                </div>
+                            ) : activeSession.user_id && currentUser && activeSession.user_id !== String(currentUser.id) ? (
+                                /* ── Read-only history view (other user's session) ── */
+                                <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
+                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '12px', padding: '4px 8px', background: 'var(--bg-secondary)', borderRadius: '4px', display: 'inline-block' }}>
+                                        Read-only · {activeSession.username || 'User'}
+                                    </div>
+                                    {historyMsgs.map((m: any, i: number) => {
+                                        if (m.role === 'tool_call') {
+                                            let parsed: any = {}; try { parsed = typeof m.content === 'string' ? JSON.parse(m.content) : m.content; } catch { parsed = { name: 'tool', result: m.content }; }
+                                            return (
+                                                <div key={i} style={{ display: 'flex', gap: '8px', marginBottom: '6px', paddingLeft: '36px' }}>
+                                                    <details style={{ flex: 1, borderRadius: '8px', background: 'var(--accent-subtle)', border: '1px solid var(--accent-subtle)', fontSize: '12px' }}>
+                                                        <summary style={{ padding: '6px 10px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', userSelect: 'none', listStyle: 'none' }}>
+                                                            <span style={{ fontWeight: 600, color: 'var(--accent-text)' }}>{parsed.name || 'tool'}</span>
+                                                            <span style={{ color: 'var(--text-tertiary)', fontSize: '11px', marginLeft: 'auto' }}>done</span>
+                                                        </summary>
+                                                        {parsed.result && <div style={{ padding: '4px 10px 8px', color: 'var(--text-secondary)', fontSize: '11px', fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '160px', overflow: 'auto' }}>{parsed.result}</div>}
+                                                    </details>
+                                                </div>
+                                            );
+                                        }
+                                        return (
+                                            <div key={i} style={{ display: 'flex', flexDirection: m.role === 'assistant' ? 'row' : 'row-reverse', gap: '8px', marginBottom: '8px' }}>
+                                                <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: m.role === 'assistant' ? 'var(--bg-elevated)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', flexShrink: 0, color: 'var(--text-secondary)', fontWeight: 600 }}>{m.role === 'assistant' ? 'A' : 'U'}</div>
+                                                <div style={{ maxWidth: '70%', padding: '8px 12px', borderRadius: '12px', background: m.role === 'assistant' ? 'var(--bg-secondary)' : 'rgba(16,185,129,0.1)', fontSize: '13px', lineHeight: '1.5', wordBreak: 'break-word' }}>
+                                                    {m.role === 'assistant' ? <MarkdownRenderer content={m.content} /> : <div style={{ whiteSpace: 'pre-wrap' }}>{m.content}</div>}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            ) : (
+                                /* ── Live WebSocket chat (own session) ── */
+                                <>
+                                    <div ref={chatContainerRef} onScroll={handleChatScroll} style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
+                                        {chatMessages.length === 0 && (
+                                            <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-tertiary)' }}>
+                                                <div style={{ fontSize: '13px', marginBottom: '4px' }}>{activeSession?.title || t('agent.chat.startChat')}</div>
+                                                <div style={{ fontSize: '12px' }}>{t('agent.chat.startConversation', { name: agent.name })}</div>
+                                                <div style={{ fontSize: '11px', marginTop: '4px', opacity: 0.7 }}>{t('agent.chat.fileSupport')}</div>
                                             </div>
                                         )}
-                                        <div style={{ display: 'flex', gap: '8px', padding: '8px 0 0' }}>
-                                            <input type="file" ref={fileInputRef} onChange={handleChatFile} style={{ display: 'none' }} />
-                                            <button className="btn btn-secondary" onClick={() => fileInputRef.current?.click()} disabled={!wsConnected || uploading} style={{ padding: '6px 10px', fontSize: '14px', minWidth: 'auto' }}>{uploading ? '⏳' : '⌇'}</button>
-                                            <input
-                                                ref={chatInputRef}
-                                                className="chat-input"
-                                                value={chatInput}
-                                                onChange={e => setChatInput(e.target.value)}
-                                                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMsg(); } }}
-                                                placeholder={attachedFile ? t('agent.chat.askAboutFile', { name: attachedFile.name }) : t('chat.placeholder')}
-                                                disabled={!wsConnected}
-                                                style={{ flex: 1 }}
-                                                autoFocus
-                                            />
-                                            <button className="btn btn-primary" onClick={sendChatMsg} disabled={!wsConnected || (!chatInput.trim() && !attachedFile)} style={{ padding: '6px 16px' }}>{t('chat.send')}</button>
-                                        </div>
-                                    </>
-                                ) : !selectedConv ? (
-                                    <div style={{ color: 'var(--text-tertiary)', textAlign: 'center', paddingTop: '80px', fontSize: '13px' }}>Select a conversation</div>
-                                ) : convMessages.length === 0 ? (
-                                    <div style={{ color: 'var(--text-tertiary)', textAlign: 'center', paddingTop: '80px', fontSize: '13px' }}>No messages</div>
-                                ) : (
-                                    <div style={{ flex: 1, overflowY: 'auto', padding: '4px' }}>
-                                        {convMessages.map((m: any) => {
-                                            // ── Tool call messages ──
-                                            if (m.role === 'tool_call') {
-                                                let parsed: any = {};
-                                                try { parsed = typeof m.content === 'string' ? JSON.parse(m.content) : m.content; } catch { parsed = { name: 'tool', result: m.content }; }
-                                                const tName = parsed.name || m.tool_name || 'tool';
-                                                const tArgs = parsed.args || parsed.arguments || {};
-                                                const tResult = parsed.result ?? parsed.output ?? '';
-                                                const isDone = parsed.status === 'done' || !!tResult;
-                                                const ts = m.created_at ? new Date(m.created_at).toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+                                        {chatMessages.map((msg, i) => {
+                                            if (msg.role === 'tool_call') {
                                                 return (
-                                                    <div key={m.id} style={{ display: 'flex', gap: '8px', marginBottom: '6px', paddingLeft: '36px' }}>
+                                                    <div key={i} style={{ display: 'flex', gap: '8px', marginBottom: '6px', paddingLeft: '36px' }}>
                                                         <details style={{ flex: 1, borderRadius: '8px', background: 'var(--accent-subtle)', border: '1px solid var(--accent-subtle)', fontSize: '12px' }}>
                                                             <summary style={{ padding: '6px 10px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', userSelect: 'none', listStyle: 'none' }}>
-                                                                <span style={{ fontSize: '13px' }}>{isDone ? '⚡' : '⏳'}</span>
-                                                                <span style={{ fontWeight: 600, color: 'var(--accent-text)' }}>{tName}</span>
-                                                                {Object.keys(tArgs).length > 0 && (
-                                                                    <span style={{ color: 'var(--text-tertiary)', fontSize: '11px', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-                                                                        {`(${Object.entries(tArgs).map(([k, v]) => `${k}: ${typeof v === 'string' ? v.slice(0, 30) : JSON.stringify(v)}`).join(', ')})`}
-                                                                    </span>
-                                                                )}
-                                                                {ts && <span style={{ color: 'var(--text-tertiary)', fontSize: '10px', marginLeft: 'auto', flexShrink: 0 }}>{ts}</span>}
+                                                                <span style={{ fontSize: '13px' }}>{msg.toolStatus === 'running' ? '⏳' : '⚡'}</span>
+                                                                <span style={{ fontWeight: 600, color: 'var(--accent-text)' }}>{msg.toolName}</span>
+                                                                {msg.toolArgs && Object.keys(msg.toolArgs).length > 0 && <span style={{ color: 'var(--text-tertiary)', fontSize: '11px', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{`(${Object.entries(msg.toolArgs).map(([k, v]) => `${k}: ${typeof v === 'string' ? v.slice(0, 30) : JSON.stringify(v)}`).join(', ')})`}</span>}
+                                                                {msg.toolStatus === 'running' && <span style={{ color: 'var(--text-tertiary)', fontSize: '11px', marginLeft: 'auto' }}>{t('common.loading')}</span>}
                                                             </summary>
-                                                            {tResult && (
-                                                                <div style={{ padding: '4px 10px 8px' }}>
-                                                                    <div style={{ color: 'var(--text-secondary)', fontSize: '11px', fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '240px', overflow: 'auto', background: 'rgba(0,0,0,0.15)', borderRadius: '4px', padding: '4px 6px' }}>
-                                                                        {typeof tResult === 'string' ? tResult : JSON.stringify(tResult, null, 2)}
-                                                                    </div>
-                                                                </div>
-                                                            )}
+                                                            {msg.toolResult && <div style={{ padding: '4px 10px 8px' }}><div style={{ color: 'var(--text-secondary)', fontSize: '11px', fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '240px', overflow: 'auto', background: 'rgba(0,0,0,0.15)', borderRadius: '4px', padding: '4px 6px' }}>{msg.toolResult}</div></div>}
                                                         </details>
                                                     </div>
                                                 );
                                             }
-                                            // ── Regular messages ──
                                             return (
-                                                <div key={m.id} style={{ display: 'flex', flexDirection: m.role === 'assistant' ? 'row' : 'row-reverse', gap: '8px', marginBottom: '8px' }}>
-                                                    <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: m.role === 'assistant' ? 'rgba(224,238,238,0.15)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', flexShrink: 0 }}>
-                                                        {m.role === 'assistant' ? 'A' : 'U'}
-                                                    </div>
-                                                    <div style={{ maxWidth: '70%', padding: '8px 12px', borderRadius: '12px', background: m.role === 'assistant' ? 'var(--bg-secondary)' : 'rgba(224,238,238,0.15)', fontSize: '13px', lineHeight: '1.5', wordBreak: 'break-word' }}>
-                                                        {m.sender_name && <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '2px' }}>{m.sender_name}</div>}
-                                                        {m.role === 'assistant' ? <MarkdownRenderer content={m.content} /> : <div style={{ whiteSpace: 'pre-wrap' }}>{m.content}</div>}
-                                                        <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{m.created_at ? new Date(m.created_at).toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : ''}</div>
+                                                <div key={i} style={{ display: 'flex', flexDirection: msg.role === 'assistant' ? 'row' : 'row-reverse', gap: '8px', marginBottom: '8px' }}>
+                                                    <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: msg.role === 'assistant' ? 'var(--bg-elevated)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', flexShrink: 0, color: 'var(--text-secondary)', fontWeight: 600 }}>{msg.role === 'user' ? 'U' : 'A'}</div>
+                                                    <div style={{ maxWidth: '70%', padding: '8px 12px', borderRadius: '12px', background: msg.role === 'assistant' ? 'var(--bg-secondary)' : 'rgba(16,185,129,0.1)', fontSize: '13px', lineHeight: '1.5', wordBreak: 'break-word' }}>
+                                                        {msg.fileName && <div style={{ fontSize: '10px', color: 'var(--accent)', marginBottom: '2px' }}>⌇ {msg.fileName}</div>}
+                                                        {msg.role === 'assistant' ? <MarkdownRenderer content={msg.content} /> : <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>}
                                                     </div>
                                                 </div>
                                             );
                                         })}
+                                        <div ref={chatEndRef} />
                                     </div>
-                                )}
-                            </div>
+                                    {showScrollBtn && (
+                                        <button onClick={scrollToBottom} style={{ position: 'absolute', bottom: '70px', right: '20px', width: '32px', height: '32px', borderRadius: '50%', background: 'var(--bg-elevated)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.3)', zIndex: 10 }} title="Scroll to bottom">↓</button>
+                                    )}
+                                    {attachedFile && (
+                                        <div style={{ padding: '4px 16px', background: 'var(--bg-elevated)', borderTop: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px' }}>
+                                            <span>⌇ {attachedFile.name}</span>
+                                            <button onClick={() => setAttachedFile(null)} style={{ background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer' }}>✕</button>
+                                        </div>
+                                    )}
+                                    <div style={{ display: 'flex', gap: '8px', padding: '8px 16px', borderTop: '1px solid var(--border-subtle)' }}>
+                                        <input type="file" ref={fileInputRef} onChange={handleChatFile} style={{ display: 'none' }} />
+                                        <button className="btn btn-secondary" onClick={() => fileInputRef.current?.click()} disabled={!wsConnected || uploading} style={{ padding: '6px 10px', fontSize: '14px', minWidth: 'auto' }}>{uploading ? '⏳' : '⌇'}</button>
+                                        <input ref={chatInputRef} className="chat-input" value={chatInput} onChange={e => setChatInput(e.target.value)}
+                                            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMsg(); } }}
+                                            placeholder={attachedFile ? t('agent.chat.askAboutFile', { name: attachedFile.name }) : t('chat.placeholder')}
+                                            disabled={!wsConnected} style={{ flex: 1 }} autoFocus />
+                                        <button className="btn btn-primary" onClick={sendChatMsg} disabled={!wsConnected || (!chatInput.trim() && !attachedFile)} style={{ padding: '6px 16px' }}>{t('chat.send')}</button>
+                                    </div>
+                                </>
+                            )}
                         </div>
                     </div>
                 )}
@@ -2823,59 +2859,61 @@ export default function AgentDetail() {
             }
 
             {/* ── Expiry Editor Modal (admin only) ── */}
-            {showExpiryModal && (
-                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 9000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                    onClick={() => setShowExpiryModal(false)}>
-                    <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)', borderRadius: '12px', padding: '24px', width: '360px', maxWidth: '90vw' }}
-                        onClick={e => e.stopPropagation()}>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
-                            <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 600 }}>⏰ Agent 过期时间</h3>
-                            <button onClick={() => setShowExpiryModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', fontSize: '18px', lineHeight: 1 }}>×</button>
-                        </div>
-                        <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '16px' }}>
-                            {(agent as any).is_expired
-                                ? <span style={{ color: 'var(--error)', fontWeight: 600 }}>⏰ 已过期</span>
-                                : (agent as any).expires_at
-                                    ? <>当前过期时间：<strong>{new Date((agent as any).expires_at).toLocaleString()}</strong></>
-                                    : <span style={{ color: 'var(--success)' }}>永不过期</span>
-                            }
-                        </div>
-                        <div style={{ marginBottom: '16px' }}>
-                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>快速续期（从当前基础上）</div>
-                            <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                                {([['+ 24h', 24], ['+ 7天', 168], ['+ 30天', 720], ['+ 90天', 2160]] as [string, number][]).map(([label, h]) => (
-                                    <button key={h} onClick={() => addHours(h)}
-                                        style={{ padding: '4px 10px', borderRadius: '6px', border: '1px solid var(--border-subtle)', background: 'var(--bg-primary)', cursor: 'pointer', fontSize: '12px', color: 'var(--text-primary)' }}>
-                                        {label}
-                                    </button>
-                                ))}
+            {
+                showExpiryModal && (
+                    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 9000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                        onClick={() => setShowExpiryModal(false)}>
+                        <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)', borderRadius: '12px', padding: '24px', width: '360px', maxWidth: '90vw' }}
+                            onClick={e => e.stopPropagation()}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+                                <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 600 }}>⏰ Agent 过期时间</h3>
+                                <button onClick={() => setShowExpiryModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', fontSize: '18px', lineHeight: 1 }}>×</button>
                             </div>
-                        </div>
-                        <div style={{ marginBottom: '20px' }}>
-                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '6px' }}>自定义截止时间</div>
-                            <input type="datetime-local" value={expiryValue} onChange={e => setExpiryValue(e.target.value)}
-                                style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-subtle)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: '13px', boxSizing: 'border-box' }} />
-                        </div>
-                        <div style={{ display: 'flex', gap: '8px', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <button onClick={() => saveExpiry(true)} disabled={expirySaving}
-                                style={{ padding: '7px 12px', borderRadius: '8px', border: '1px solid var(--border-subtle)', background: 'none', cursor: 'pointer', fontSize: '12px', color: 'var(--text-secondary)' }}>
-                                🔓 永不过期
-                            </button>
-                            <div style={{ display: 'flex', gap: '8px' }}>
-                                <button onClick={() => setShowExpiryModal(false)} disabled={expirySaving}
-                                    style={{ padding: '7px 14px', borderRadius: '8px', border: '1px solid var(--border-subtle)', background: 'none', cursor: 'pointer', fontSize: '13px', color: 'var(--text-secondary)' }}>
-                                    取消
+                            <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '16px' }}>
+                                {(agent as any).is_expired
+                                    ? <span style={{ color: 'var(--error)', fontWeight: 600 }}>⏰ 已过期</span>
+                                    : (agent as any).expires_at
+                                        ? <>当前过期时间：<strong>{new Date((agent as any).expires_at).toLocaleString()}</strong></>
+                                        : <span style={{ color: 'var(--success)' }}>永不过期</span>
+                                }
+                            </div>
+                            <div style={{ marginBottom: '16px' }}>
+                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>快速续期（从当前基础上）</div>
+                                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                                    {([['+ 24h', 24], ['+ 7天', 168], ['+ 30天', 720], ['+ 90天', 2160]] as [string, number][]).map(([label, h]) => (
+                                        <button key={h} onClick={() => addHours(h)}
+                                            style={{ padding: '4px 10px', borderRadius: '6px', border: '1px solid var(--border-subtle)', background: 'var(--bg-primary)', cursor: 'pointer', fontSize: '12px', color: 'var(--text-primary)' }}>
+                                            {label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                            <div style={{ marginBottom: '20px' }}>
+                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '6px' }}>自定义截止时间</div>
+                                <input type="datetime-local" value={expiryValue} onChange={e => setExpiryValue(e.target.value)}
+                                    style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-subtle)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: '13px', boxSizing: 'border-box' }} />
+                            </div>
+                            <div style={{ display: 'flex', gap: '8px', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <button onClick={() => saveExpiry(true)} disabled={expirySaving}
+                                    style={{ padding: '7px 12px', borderRadius: '8px', border: '1px solid var(--border-subtle)', background: 'none', cursor: 'pointer', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                    🔓 永不过期
                                 </button>
-                                <button onClick={() => saveExpiry(false)} disabled={expirySaving || !expiryValue}
-                                    className="btn btn-primary"
-                                    style={{ opacity: !expiryValue ? 0.5 : 1 }}>
-                                    {expirySaving ? '保存中…' : '保存'}
-                                </button>
+                                <div style={{ display: 'flex', gap: '8px' }}>
+                                    <button onClick={() => setShowExpiryModal(false)} disabled={expirySaving}
+                                        style={{ padding: '7px 14px', borderRadius: '8px', border: '1px solid var(--border-subtle)', background: 'none', cursor: 'pointer', fontSize: '13px', color: 'var(--text-secondary)' }}>
+                                        取消
+                                    </button>
+                                    <button onClick={() => saveExpiry(false)} disabled={expirySaving || !expiryValue}
+                                        className="btn btn-primary"
+                                        style={{ opacity: !expiryValue ? 0.5 : 1 }}>
+                                        {expirySaving ? '保存中…' : '保存'}
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </div>
-                </div>
-            )}
+                )
+            }
 
         </>
     );
