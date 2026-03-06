@@ -278,11 +278,33 @@ async def discord_interaction_webhook(
                 creator_id = agent_obj.creator_id if agent_obj else agent_id
                 ctx_size = agent_obj.context_window_size if agent_obj else 20
 
+                # Find-or-create platform user for this Discord sender
+                from app.models.user import User as _User
+                from app.core.security import hash_password as _hp
+                import uuid as _uuid
+                _username = f"discord_{sender_id}"
+                _u_r = await bg_db.execute(select(_User).where(_User.username == _username))
+                _platform_user = _u_r.scalar_one_or_none()
+                if not _platform_user:
+                    _discord_username = body.get("member", {}).get("user", {}).get("username") or body.get("user", {}).get("username", "")
+                    _display = _discord_username or f"Discord User {sender_id[:8]}"
+                    _platform_user = _User(
+                        username=_username,
+                        email=f"{_username}@discord.local",
+                        password_hash=_hp(_uuid.uuid4().hex),
+                        display_name=_display,
+                        role="member",
+                        tenant_id=agent_obj.tenant_id if agent_obj else None,
+                    )
+                    bg_db.add(_platform_user)
+                    await bg_db.flush()
+                platform_user_id = _platform_user.id
+
                 # Find-or-create ChatSession for this Discord conversation
                 sess = await find_or_create_channel_session(
                     db=bg_db,
                     agent_id=agent_id,
-                    user_id=creator_id,
+                    user_id=platform_user_id,
                     external_conv_id=conv_id,
                     source_channel="discord",
                     first_message_title=user_text,
@@ -299,7 +321,7 @@ async def discord_interaction_webhook(
                 history = [{"role": m.role, "content": m.content} for m in reversed(history_r.scalars().all())]
 
                 # Save user message
-                bg_db.add(ChatMessage(agent_id=agent_id, user_id=creator_id, role="user", content=user_text, conversation_id=session_conv_id))
+                bg_db.add(ChatMessage(agent_id=agent_id, user_id=platform_user_id, role="user", content=user_text, conversation_id=session_conv_id))
                 sess.last_message_at = datetime.now(timezone.utc)
                 await bg_db.commit()
 
@@ -308,7 +330,7 @@ async def discord_interaction_webhook(
                 print(f"[Discord] LLM reply: {reply_text[:80]}")
 
                 # Save reply
-                bg_db.add(ChatMessage(agent_id=agent_id, user_id=creator_id, role="assistant", content=reply_text, conversation_id=session_conv_id))
+                bg_db.add(ChatMessage(agent_id=agent_id, user_id=platform_user_id, role="assistant", content=reply_text, conversation_id=session_conv_id))
                 sess.last_message_at = datetime.now(timezone.utc)
                 await bg_db.commit()
 

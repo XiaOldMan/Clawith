@@ -1759,12 +1759,17 @@ export default function AgentDetail() {
                                     ) : sessions.map((s: any) => {
                                         const isActive = activeSession?.id === s.id;
                                         const isOwn = s.user_id === String(currentUser?.id);
+                                        const channelLabel: Record<string, string> = { feishu: '飞书', discord: 'Discord', slack: 'Slack' };
+                                        const chLabel = channelLabel[s.source_channel];
                                         return (
                                             <div key={s.id} onClick={() => selectSession(s)}
                                                 style={{ padding: '8px 12px', cursor: 'pointer', borderLeft: isActive ? '2px solid var(--accent-primary)' : '2px solid transparent', background: isActive ? 'var(--bg-secondary)' : 'transparent', marginBottom: '1px' }}
                                                 onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'var(--bg-secondary)'; }}
                                                 onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}>
-                                                <div style={{ fontSize: '12px', fontWeight: isActive ? 600 : 400, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: '2px' }}>{s.title}</div>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '2px' }}>
+                                                    <div style={{ fontSize: '12px', fontWeight: isActive ? 600 : 400, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{s.title}</div>
+                                                    {chLabel && <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)', flexShrink: 0 }}>{chLabel}</span>}
+                                                </div>
                                                 <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
                                                     {isOwn && isActive && wsConnected && <span className="status-dot running" style={{ width: '5px', height: '5px', flexShrink: 0 }} />}
                                                     {s.last_message_at ? new Date(s.last_message_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : new Date(s.created_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric' })}
@@ -1791,7 +1796,14 @@ export default function AgentDetail() {
                                                             style={{ padding: '6px 12px', cursor: 'pointer', borderLeft: isActive ? '2px solid var(--accent-primary)' : '2px solid transparent', background: isActive ? 'var(--bg-secondary)' : 'transparent' }}
                                                             onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'var(--bg-secondary)'; }}
                                                             onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}>
-                                                            <div style={{ fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>{s.title}</div>
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '1px' }}>
+                                                                <div style={{ fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)', flex: 1 }}>{s.title}</div>
+                                                                {({ feishu: '飞书', discord: 'Discord', slack: 'Slack' } as Record<string, string>)[s.source_channel] && (
+                                                                    <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)', flexShrink: 0 }}>
+                                                                        {({ feishu: '飞书', discord: 'Discord', slack: 'Slack' } as Record<string, string>)[s.source_channel]}
+                                                                    </span>
+                                                                )}
+                                                            </div>
                                                             <div style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>
                                                                 {s.last_message_at ? new Date(s.last_message_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}
                                                                 {s.message_count > 0 && ` · ${s.message_count}`}

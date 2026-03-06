@@ -235,11 +235,31 @@ async def slack_event_webhook(
     creator_id = agent_obj.creator_id if agent_obj else agent_id
     ctx_size = agent_obj.context_window_size if agent_obj else 20
 
+    # Find-or-create platform user for this Slack sender
+    from app.models.user import User as _User
+    from app.core.security import hash_password as _hp
+    import uuid as _uuid2
+    _slack_username = f"slack_{sender_id}"
+    _u_r = await db.execute(select(_User).where(_User.username == _slack_username))
+    _platform_user = _u_r.scalar_one_or_none()
+    if not _platform_user:
+        _platform_user = _User(
+            username=_slack_username,
+            email=f"{_slack_username}@slack.local",
+            password_hash=_hp(_uuid2.uuid4().hex),
+            display_name=f"Slack User {sender_id[:8]}",
+            role="member",
+            tenant_id=agent_obj.tenant_id if agent_obj else None,
+        )
+        db.add(_platform_user)
+        await db.flush()
+    platform_user_id = _platform_user.id
+
     # Find-or-create session for this Slack conversation
     sess = await find_or_create_channel_session(
         db=db,
         agent_id=agent_id,
-        user_id=creator_id,  # Slack doesn't resolve to platform users yet
+        user_id=platform_user_id,
         external_conv_id=conv_id,
         source_channel="slack",
         first_message_title=user_text,
@@ -256,7 +276,7 @@ async def slack_event_webhook(
 
     # Save user message
     from datetime import datetime, timezone
-    db.add(ChatMessage(agent_id=agent_id, user_id=creator_id, role="user", content=user_text, conversation_id=session_conv_id))
+    db.add(ChatMessage(agent_id=agent_id, user_id=platform_user_id, role="user", content=user_text, conversation_id=session_conv_id))
     sess.last_message_at = datetime.now(timezone.utc)
     await db.commit()
 
@@ -266,7 +286,7 @@ async def slack_event_webhook(
     print(f"[Slack] LLM reply: {reply_text[:80]}")
 
     # Save reply
-    db.add(ChatMessage(agent_id=agent_id, user_id=creator_id, role="assistant", content=reply_text, conversation_id=session_conv_id))
+    db.add(ChatMessage(agent_id=agent_id, user_id=platform_user_id, role="assistant", content=reply_text, conversation_id=session_conv_id))
     sess.last_message_at = datetime.now(timezone.utc)
     await db.commit()
 
