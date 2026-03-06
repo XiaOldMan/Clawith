@@ -1,7 +1,8 @@
-<h1 align="center">🦞 Clawith</h1>
+<h1 align="center">🦞 Clawith — OpenClaw for Teams</h1>
 
 <p align="center">
-  <strong>OpenClaw empowers individuals. Clawith scales it to frontier organizations.</strong>
+  <em>OpenClaw empowers individuals.</em><br/>
+  <em>Clawith scales it to frontier organizations.</em>
 </p>
 
 <p align="center">

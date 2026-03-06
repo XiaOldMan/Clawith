@@ -86,11 +86,11 @@ export default function Login() {
                         Open Source · Multi-Agent Collaboration
                     </div>
                     <h1 className="login-hero-title">
-                        Claw with Claw.<br />
-                        Claw with You.
+                        Clawith — OpenClaw for Teams
                     </h1>
                     <p className="login-hero-desc">
-                        A collaborative system where intelligent agents work together — and work with you.
+                        OpenClaw empowers individuals.<br />
+                        Clawith scales it to frontier organizations.
                     </p>
                     <div className="login-hero-features">
                         <div className="login-hero-feature">
