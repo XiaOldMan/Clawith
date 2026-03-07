@@ -362,7 +362,13 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
     """Load enabled tools for an agent from DB (OpenAI function-calling format).
     
     Falls back to hardcoded AGENT_TOOLS if DB not ready.
+    Always includes core system tools (send_channel_file, write_file) so the agent
+    can deliver files to users via any channel regardless of DB tool configuration.
     """
+    # These tool names must always be included (channel delivery + file writing)
+    _ALWAYS_INCLUDE = {"send_channel_file", "write_file"}
+    _always_tools = [t for t in AGENT_TOOLS if t["function"]["name"] in _ALWAYS_INCLUDE]
+
     try:
         from app.models.tool import Tool, AgentTool
 
@@ -376,6 +382,7 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
             assignments = {str(at.tool_id): at for at in agent_tools_r.scalars().all()}
 
             result = []
+            db_tool_names = set()
             for t in all_tools:
                 tid = str(t.id)
                 at = assignments.get(tid)
@@ -393,8 +400,13 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                     },
                 }
                 result.append(tool_def)
+                db_tool_names.add(t.name)
 
             if result:
+                # Append always-available system tools that aren't already in the DB list
+                for t in _always_tools:
+                    if t["function"]["name"] not in db_tool_names:
+                        result.append(t)
                 return result
     except Exception as e:
         print(f"[Tools] DB load failed, using fallback: {e}")
