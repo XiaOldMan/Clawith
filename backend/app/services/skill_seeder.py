@@ -605,9 +605,15 @@ async def seed_skills():
                     select(Skill).where(Skill.id == existing.id).options(selectinload(Skill.files))
                 )
                 sk = res2.scalar_one()
-                existing_paths = {f.path for f in sk.files}
+                existing_paths = {f.path: f for f in sk.files}
                 for f in skill_data["files"]:
-                    if f["path"] not in existing_paths:
+                    if f["path"] in existing_paths:
+                        # Update content if changed
+                        existing_file = existing_paths[f["path"]]
+                        if existing_file.content != f["content"]:
+                            existing_file.content = f["content"]
+                            print(f"[SkillSeeder] Updated {f['path']} in {skill_data['name']}")
+                    else:
                         db.add(SkillFile(skill_id=existing.id, path=f["path"], content=f["content"]))
                         print(f"[SkillSeeder] Added file {f['path']} to {skill_data['name']}")
             else:
