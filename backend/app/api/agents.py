@@ -140,6 +140,14 @@ async def create_agent(
     db.add(agent)
     await db.flush()
 
+    # Auto-create Participant identity for the new agent
+    from app.models.participant import Participant
+    db.add(Participant(
+        type="agent", ref_id=agent.id,
+        display_name=agent.name, avatar_url=agent.avatar_url,
+    ))
+    await db.flush()
+
     # Set permissions
     access_level = data.permission_access_level if data.permission_access_level in ("use", "manage") else "use"
     if data.permission_scope_type == "company":
@@ -338,6 +346,19 @@ async def update_agent(
     for field, value in update_data.items():
         setattr(agent, field, value)
     await db.flush()
+
+    # Sync Participant display_name / avatar if changed
+    if "name" in update_data or "avatar_url" in update_data:
+        from app.models.participant import Participant
+        p_r = await db.execute(select(Participant).where(Participant.type == "agent", Participant.ref_id == agent_id))
+        p = p_r.scalar_one_or_none()
+        if p:
+            if "name" in update_data:
+                p.display_name = agent.name
+            if "avatar_url" in update_data:
+                p.avatar_url = agent.avatar_url
+            await db.flush()
+
     return AgentOut.model_validate(agent)
 
 
@@ -372,6 +393,7 @@ async def delete_agent(
         "audit_logs",
         "approval_requests",
         "chat_messages",
+        "chat_sessions",
         "tasks",
         "agent_schedules",
         "channel_configs",
@@ -401,6 +423,16 @@ async def delete_agent(
     try:
         async with db.begin_nested():
             await db.execute(text("DELETE FROM plaza_posts WHERE author_id = :aid"), {"aid": str(agent_id)})
+    except Exception:
+        pass
+
+    # Clean up Participant identity
+    try:
+        async with db.begin_nested():
+            await db.execute(
+                text("DELETE FROM participants WHERE type = 'agent' AND ref_id = :aid"),
+                {"aid": agent_id},
+            )
     except Exception:
         pass
 

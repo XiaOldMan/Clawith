@@ -133,6 +133,12 @@ async def seed_default_agents():
         db.add(meeseeks)
         await db.flush()  # get IDs
 
+        # ── Participant identities ──
+        from app.models.participant import Participant
+        db.add(Participant(type="agent", ref_id=morty.id, display_name=morty.name, avatar_url=morty.avatar_url))
+        db.add(Participant(type="agent", ref_id=meeseeks.id, display_name=meeseeks.name, avatar_url=meeseeks.avatar_url))
+        await db.flush()
+
         # ── Permissions (company-wide, manage) ──
         db.add(AgentPermission(agent_id=morty.id, scope_type="company", access_level="manage"))
         db.add(AgentPermission(agent_id=meeseeks.id, scope_type="company", access_level="manage"))

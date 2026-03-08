@@ -82,7 +82,7 @@ async def lifespan(app: FastAPI):
         import app.models.system_settings  # noqa
         import app.models.invitation_code  # noqa
         import app.models.tenant         # noqa
-        import app.models.message        # noqa
+        import app.models.participant    # noqa
         import app.models.chat_session   # noqa
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)

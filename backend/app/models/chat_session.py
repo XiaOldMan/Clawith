@@ -1,4 +1,4 @@
-"""Chat session model for grouping web chat messages per user-agent pair."""
+"""Chat session model for grouping chat messages per participant-agent pair."""
 
 import uuid
 from datetime import datetime
@@ -29,5 +29,9 @@ class ChatSession(Base):
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="New Session")
     source_channel: Mapped[str] = mapped_column(String(20), nullable=False, default="web")
     external_conv_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Participant identity (unified User/Agent identity)
+    participant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("participants.id"), nullable=True)
+    # For agent-to-agent sessions: the other agent in the conversation
+    peer_agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("agents.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -31,11 +31,15 @@ class SessionOut(BaseModel):
     agent_id: str
     user_id: str
     username: Optional[str] = None      # display_name ?? username
-    source_channel: str = "web"         # web / feishu / discord / slack
+    source_channel: str = "web"         # web / feishu / discord / slack / agent
     title: str
     created_at: str
     last_message_at: Optional[str] = None
     message_count: int = 0
+    # Agent-to-agent session fields
+    peer_agent_id: Optional[str] = None
+    peer_agent_name: Optional[str] = None
+    participant_type: str = "user"       # 'user' | 'agent'
 
     class Config:
         from_attributes = True
@@ -67,25 +71,52 @@ async def list_sessions(
         if not _is_admin_or_creator(current_user, agent):
             raise HTTPException(status_code=403, detail="Not authorized to view all sessions")
 
-        # Fetch all sessions with display names
+        # Fetch all sessions (including agent-to-agent where this agent is peer)
         result = await db.execute(
-            select(ChatSession, func.coalesce(User.display_name, User.username).label("display"))
-            .join(User, ChatSession.user_id == User.id)
-            .where(ChatSession.agent_id == agent_id)
+            select(ChatSession)
+            .where(
+                (ChatSession.agent_id == agent_id)
+                | ((ChatSession.peer_agent_id == agent_id) & (ChatSession.source_channel == "agent"))
+            )
             .order_by(ChatSession.last_message_at.desc().nulls_last(), ChatSession.created_at.desc())
         )
-        rows = result.all()
+        sessions = result.scalars().all()
         out = []
-        for session, display in rows:
+        for session in sessions:
             count_result = await db.execute(
                 select(func.count(ChatMessage.id)).where(
                     ChatMessage.conversation_id == str(session.id),
-                    ChatMessage.agent_id == agent_id,
                 )
             )
             count = count_result.scalar() or 0
             if count == 0:
                 continue  # hide empty sessions
+
+            # Determine display name based on session type
+            display = None
+            peer_agent_id = None
+            peer_agent_name = None
+            participant_type = "user"
+
+            if session.source_channel == "agent" and session.peer_agent_id:
+                # Agent-to-agent session
+                participant_type = "agent"
+                peer_agent_id = str(session.peer_agent_id)
+                # Get both agent names
+                a1_r = await db.execute(select(Agent.name).where(Agent.id == session.agent_id))
+                a2_r = await db.execute(select(Agent.name).where(Agent.id == session.peer_agent_id))
+                a1_name = a1_r.scalar_one_or_none() or "Agent"
+                a2_name = a2_r.scalar_one_or_none() or "Agent"
+                peer_agent_name = a2_name
+                display = f"🤖 {a1_name} ↔ {a2_name}"
+            else:
+                # Human session — resolve username
+                user_r = await db.execute(
+                    select(func.coalesce(User.display_name, User.username))
+                    .where(User.id == session.user_id)
+                )
+                display = user_r.scalar_one_or_none() or "Unknown"
+
             out.append(SessionOut(
                 id=str(session.id),
                 agent_id=str(session.agent_id),
@@ -96,13 +127,20 @@ async def list_sessions(
                 created_at=session.created_at.isoformat(),
                 last_message_at=session.last_message_at.isoformat() if session.last_message_at else None,
                 message_count=count,
+                peer_agent_id=peer_agent_id,
+                peer_agent_name=peer_agent_name,
+                participant_type=participant_type,
             ))
         return out
 
     else:  # scope == "mine"
         result = await db.execute(
             select(ChatSession)
-            .where(ChatSession.agent_id == agent_id, ChatSession.user_id == current_user.id)
+            .where(
+                ChatSession.agent_id == agent_id,
+                ChatSession.user_id == current_user.id,
+                ChatSession.source_channel != "agent",  # Exclude agent-to-agent sessions
+            )
             .order_by(ChatSession.last_message_at.desc().nulls_last(), ChatSession.created_at.desc())
         )
         sessions = result.scalars().all()
@@ -209,8 +247,12 @@ async def get_session_messages(
     db: AsyncSession = Depends(get_db),
 ):
     """Get chat messages for a specific session."""
+    # Allow looking up sessions where agent_id OR peer_agent_id matches
     result = await db.execute(
-        select(ChatSession).where(ChatSession.id == session_id, ChatSession.agent_id == agent_id)
+        select(ChatSession).where(
+            ChatSession.id == session_id,
+            (ChatSession.agent_id == agent_id) | (ChatSession.peer_agent_id == agent_id),
+        )
     )
     session = result.scalar_one_or_none()
     if not session:
@@ -222,9 +264,10 @@ async def get_session_messages(
     if str(session.user_id) != str(current_user.id) and not _is_admin_or_creator(current_user, agent):
         raise HTTPException(status_code=403, detail="Not authorized to view this session")
 
+    # Query messages by conversation_id only (agent-to-agent uses session_agent_id)
     msgs_result = await db.execute(
         select(ChatMessage)
-        .where(ChatMessage.conversation_id == str(session_id), ChatMessage.agent_id == agent_id)
+        .where(ChatMessage.conversation_id == str(session_id))
         .order_by(ChatMessage.created_at.asc())
         .limit(500)
     )
@@ -244,5 +287,10 @@ async def get_session_messages(
                 entry["toolResult"] = data.get("result", "")
             except Exception:
                 pass
+        # For agent-to-agent sessions, include sender name from Participant
+        if session.source_channel == "agent" and m.participant_id:
+            from app.models.participant import Participant
+            p_r = await db.execute(select(Participant.display_name).where(Participant.id == m.participant_id))
+            entry["sender_name"] = p_r.scalar_one_or_none() or "Unknown"
         out.append(entry)
     return out

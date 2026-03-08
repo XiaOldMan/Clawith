@@ -15,7 +15,7 @@ from app.models.llm import LLMModel  # noqa: F401
 from app.models.task import Task  # noqa: F401
 from app.models.skill import Skill  # noqa: F401
 from app.models.tool import Tool  # noqa: F401
-from app.models.message import Message  # noqa: F401
+from app.models.participant import Participant  # noqa: F401
 from app.models.channel_config import ChannelConfig  # noqa: F401
 from app.models.schedule import AgentSchedule  # noqa: F401
 from app.models.audit import AuditLog  # noqa: F401

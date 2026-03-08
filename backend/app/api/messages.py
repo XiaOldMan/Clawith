@@ -1,16 +1,23 @@
-"""Messages API — inbox, unread count, mark as read."""
+"""Messages API — inbox, unread count, mark as read.
+
+After the Participant abstraction migration, agent-to-agent messages are stored
+in chat_messages (via ChatSession with source_channel='agent').
+This API now queries chat_sessions + chat_messages for the inbox.
+"""
 
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_user
 from app.database import get_db
-from app.models.message import Message
 from app.models.agent import Agent
+from app.models.audit import ChatMessage
+from app.models.chat_session import ChatSession
+from app.models.participant import Participant
 from app.models.user import User
 
 router = APIRouter(tags=["messages"])
@@ -22,86 +29,57 @@ async def get_inbox(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get messages sent TO the current user (from agents or other agents they manage).
+    """Get agent-to-agent messages for agents the current user manages.
 
-    Returns messages where receiver is the current user,
-    plus messages to agents the user created.
+    Returns recent messages from ChatSessions with source_channel='agent'
+    where the user's agents are participants.
     """
-    # Messages directly to this user
-    user_msgs_q = select(Message).where(
-        Message.receiver_type == "user",
-        Message.receiver_id == current_user.id,
+    # Find agents the current user created
+    agent_ids_q = await db.execute(select(Agent.id).where(Agent.creator_id == current_user.id))
+    my_agent_ids = [r[0] for r in agent_ids_q.fetchall()]
+
+    if not my_agent_ids:
+        return []
+
+    # Find agent-to-agent chat sessions involving the user's agents
+    sessions_q = await db.execute(
+        select(ChatSession)
+        .where(
+            ChatSession.source_channel == "agent",
+            (ChatSession.agent_id.in_(my_agent_ids)) | (ChatSession.peer_agent_id.in_(my_agent_ids)),
+        )
+        .order_by(ChatSession.last_message_at.desc().nullslast())
+        .limit(limit)
     )
-
-    # Messages to agents this user created
-    agent_ids_q = select(Agent.id).where(Agent.creator_id == current_user.id)
-    agent_ids_result = await db.execute(agent_ids_q)
-    my_agent_ids = [r[0] for r in agent_ids_result.fetchall()]
-
-    if my_agent_ids:
-        agent_msgs_q = select(Message).where(
-            Message.receiver_type == "agent",
-            Message.receiver_id.in_(my_agent_ids),
-        )
-        from sqlalchemy import union_all
-        combined = union_all(user_msgs_q, agent_msgs_q).subquery()
-        result = await db.execute(
-            select(Message)
-            .where(Message.id.in_(select(combined.c.id)))
-            .order_by(Message.created_at.desc())
-            .limit(limit)
-        )
-    else:
-        result = await db.execute(
-            user_msgs_q.order_by(Message.created_at.desc()).limit(limit)
-        )
-
-    messages = result.scalars().all()
-
-    # Enrich with sender names
-    sender_cache: dict[str, str] = {}
-
-    async def get_sender_name(s_type: str, s_id: uuid.UUID) -> str:
-        key = f"{s_type}:{s_id}"
-        if key not in sender_cache:
-            if s_type == "agent":
-                r = await db.execute(select(Agent.name).where(Agent.id == s_id))
-                name = r.scalar_one_or_none() or "未知员工"
-            else:
-                r = await db.execute(select(User.display_name).where(User.id == s_id))
-                name = r.scalar_one_or_none() or "未知用户"
-            sender_cache[key] = name
-        return sender_cache[key]
-
-    async def get_receiver_name(r_type: str, r_id: uuid.UUID) -> str:
-        key = f"{r_type}:{r_id}"
-        if key not in sender_cache:
-            if r_type == "agent":
-                r = await db.execute(select(Agent.name).where(Agent.id == r_id))
-                name = r.scalar_one_or_none() or "未知员工"
-            else:
-                r = await db.execute(select(User.display_name).where(User.id == r_id))
-                name = r.scalar_one_or_none() or "未知用户"
-            sender_cache[key] = name
-        return sender_cache[key]
+    sessions = sessions_q.scalars().all()
 
     result_list = []
-    for msg in messages:
-        result_list.append({
-            "id": str(msg.id),
-            "sender_type": msg.sender_type,
-            "sender_id": str(msg.sender_id),
-            "sender_name": await get_sender_name(msg.sender_type, msg.sender_id),
-            "receiver_type": msg.receiver_type,
-            "receiver_id": str(msg.receiver_id),
-            "receiver_name": await get_receiver_name(msg.receiver_type, msg.receiver_id),
-            "content": msg.content,
-            "msg_type": msg.msg_type,
-            "read_at": msg.read_at.isoformat() if msg.read_at else None,
-            "created_at": msg.created_at.isoformat() if msg.created_at else None,
-        })
+    for sess in sessions:
+        # Get latest messages from this session
+        msgs_q = await db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.conversation_id == str(sess.id))
+            .order_by(ChatMessage.created_at.desc())
+            .limit(3)
+        )
+        for msg in msgs_q.scalars().all():
+            sender_name = "未知"
+            if msg.participant_id:
+                p_r = await db.execute(select(Participant.display_name).where(Participant.id == msg.participant_id))
+                sender_name = p_r.scalar_one_or_none() or "未知"
 
-    return result_list
+            result_list.append({
+                "id": str(msg.id),
+                "sender_type": "agent",
+                "sender_name": sender_name,
+                "content": msg.content,
+                "session_title": sess.title,
+                "created_at": msg.created_at.isoformat() if msg.created_at else None,
+            })
+
+    # Sort by created_at desc and limit
+    result_list.sort(key=lambda x: x["created_at"] or "", reverse=True)
+    return result_list[:limit]
 
 
 @router.get("/messages/unread-count")
@@ -109,87 +87,14 @@ async def get_unread_count(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get count of unread messages for the current user."""
-    # Direct messages to user
-    user_count_q = select(func.count(Message.id)).where(
-        Message.receiver_type == "user",
-        Message.receiver_id == current_user.id,
-        Message.read_at.is_(None),
-    )
+    """Get count of unread agent-to-agent messages for the current user's agents."""
+    agent_ids_q = await db.execute(select(Agent.id).where(Agent.creator_id == current_user.id))
+    my_agent_ids = [r[0] for r in agent_ids_q.fetchall()]
 
-    # Messages to user's agents
-    agent_ids_q = select(Agent.id).where(Agent.creator_id == current_user.id)
-    agent_ids_result = await db.execute(agent_ids_q)
-    my_agent_ids = [r[0] for r in agent_ids_result.fetchall()]
+    if not my_agent_ids:
+        return {"unread_count": 0}
 
-    user_count_result = await db.execute(user_count_q)
-    total = user_count_result.scalar() or 0
-
-    if my_agent_ids:
-        agent_count_q = select(func.count(Message.id)).where(
-            Message.receiver_type == "agent",
-            Message.receiver_id.in_(my_agent_ids),
-            Message.read_at.is_(None),
-        )
-        agent_count_result = await db.execute(agent_count_q)
-        total += agent_count_result.scalar() or 0
-
-    return {"unread_count": total}
-
-
-@router.put("/messages/{message_id}/read")
-async def mark_message_read(
-    message_id: uuid.UUID,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Mark a message as read."""
-    result = await db.execute(select(Message).where(Message.id == message_id))
-    msg = result.scalar_one_or_none()
-    if not msg:
-        raise HTTPException(status_code=404, detail="Message not found")
-
-    msg.read_at = datetime.now(timezone.utc)
-    await db.commit()
-    return {"status": "ok"}
-
-
-@router.put("/messages/read-all")
-async def mark_all_read(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Mark all messages as read for the current user."""
-    from sqlalchemy import update
-
-    now = datetime.now(timezone.utc)
-
-    # Direct messages
-    await db.execute(
-        update(Message)
-        .where(
-            Message.receiver_type == "user",
-            Message.receiver_id == current_user.id,
-            Message.read_at.is_(None),
-        )
-        .values(read_at=now)
-    )
-
-    # Messages to user's agents
-    agent_ids_q = select(Agent.id).where(Agent.creator_id == current_user.id)
-    agent_ids_result = await db.execute(agent_ids_q)
-    my_agent_ids = [r[0] for r in agent_ids_result.fetchall()]
-
-    if my_agent_ids:
-        await db.execute(
-            update(Message)
-            .where(
-                Message.receiver_type == "agent",
-                Message.receiver_id.in_(my_agent_ids),
-                Message.read_at.is_(None),
-            )
-            .values(read_at=now)
-        )
-
-    await db.commit()
-    return {"status": "ok"}
+    # Count agent-to-agent sessions with recent activity
+    # (Since we don't have per-message read tracking on ChatMessage yet,
+    # just return 0 for now — this can be enhanced later)
+    return {"unread_count": 0}

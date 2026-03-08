@@ -232,6 +232,7 @@ class LLMModelCreate(BaseModel):
     label: str
     max_tokens_per_day: int | None = None
     enabled: bool = True
+    supports_vision: bool = False
 
 
 class LLMModelOut(BaseModel):
@@ -242,6 +243,7 @@ class LLMModelOut(BaseModel):
     label: str
     max_tokens_per_day: int | None = None
     enabled: bool
+    supports_vision: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}

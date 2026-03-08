@@ -57,6 +57,7 @@ interface Message {
     fileName?: string;
     toolCalls?: ToolCall[];
     thinking?: string;
+    imageUrl?: string;
 }
 
 export default function Chat() {
@@ -68,7 +69,7 @@ export default function Chat() {
     const [connected, setConnected] = useState(false);
     const [uploading, setUploading] = useState(false);
     const [streaming, setStreaming] = useState(false);
-    const [attachedFile, setAttachedFile] = useState<{ name: string; text: string; path?: string } | null>(null);
+    const [attachedFile, setAttachedFile] = useState<{ name: string; text: string; path?: string; imageUrl?: string } | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -238,7 +239,7 @@ export default function Chat() {
             }
 
             const data = await resp.json();
-            setAttachedFile({ name: data.filename, text: data.extracted_text, path: data.workspace_path });
+            setAttachedFile({ name: data.filename, text: data.extracted_text, path: data.workspace_path, imageUrl: data.image_data_url || undefined });
         } catch (err) {
             alert(t('agent.upload.failed') + ': ' + (err as Error).message);
         } finally {
@@ -261,20 +262,30 @@ export default function Chat() {
         let contentForLLM = userMsg;
 
         if (attachedFile) {
-            const wsPath = attachedFile.path || '';
-            const codePath = wsPath.replace(/^workspace\//, '');
-            const fileLoc = wsPath ? `\nFile location: ${wsPath} (for read_file/read_document tools)\nIn execute_code, use relative path: "${codePath}" (working directory is workspace/)` : '';
-            const fileContext = `[文件: ${attachedFile.name}]${fileLoc}\n\n${attachedFile.text}`;
-            contentForLLM = userMsg
-                ? `${fileContext}\n\n用户问题: ${userMsg}`
-                : `请阅读并分析以下文件内容:\n\n${fileContext}`;
-            userMsg = userMsg || `[${t('agent.chat.attachment')}] ${attachedFile.name}`;
+            if (attachedFile.imageUrl) {
+                // Image file — embed image data marker for vision models
+                const imageMarker = `[image_data:${attachedFile.imageUrl}]`;
+                contentForLLM = userMsg
+                    ? `${imageMarker}\n${userMsg}`
+                    : `${imageMarker}\n请分析这张图片`;
+                userMsg = userMsg || `[图片] ${attachedFile.name}`;
+            } else {
+                const wsPath = attachedFile.path || '';
+                const codePath = wsPath.replace(/^workspace\//, '');
+                const fileLoc = wsPath ? `\nFile location: ${wsPath} (for read_file/read_document tools)\nIn execute_code, use relative path: "${codePath}" (working directory is workspace/)` : '';
+                const fileContext = `[文件: ${attachedFile.name}]${fileLoc}\n\n${attachedFile.text}`;
+                contentForLLM = userMsg
+                    ? `${fileContext}\n\n用户问题: ${userMsg}`
+                    : `请阅读并分析以下文件内容:\n\n${fileContext}`;
+                userMsg = userMsg || `[${t('agent.chat.attachment')}] ${attachedFile.name}`;
+            }
         }
 
         setMessages((prev) => [...prev, {
             role: 'user',
             content: userMsg,
             fileName: attachedFile?.name,
+            imageUrl: attachedFile?.imageUrl,
         }]);
         wsRef.current.send(JSON.stringify({ content: contentForLLM, display_content: userMsg, file_name: attachedFile?.name || '' }));
         setInput('');
@@ -322,6 +333,12 @@ export default function Chat() {
                             <div className="chat-bubble">
                                 {msg.fileName && (() => {
                                     const fe = msg.fileName!.split('.').pop()?.toLowerCase() ?? '';
+                                    const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(fe);
+                                    if (isImage && msg.imageUrl) {
+                                        return (<div style={{ marginBottom: '4px' }}>
+                                            <img src={msg.imageUrl} alt={msg.fileName} style={{ maxWidth: '240px', maxHeight: '180px', borderRadius: '8px', border: '1px solid var(--border-subtle)' }} />
+                                        </div>);
+                                    }
                                     const fi = fe === 'pdf' ? '\uD83D\uDCC4' : (fe === 'csv' || fe === 'xlsx' || fe === 'xls') ? '\uD83D\uDCCA' : (fe === 'docx' || fe === 'doc') ? '\uD83D\uDCDD' : '\uD83D\uDCCE';
                                     return (<div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', background: 'rgba(0,0,0,0.08)', borderRadius: '6px', padding: '4px 8px', marginBottom: msg.content ? '4px' : '0', fontSize: '11px', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}><span>{fi}</span><span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span></div>);
                                 })()}
@@ -410,7 +427,14 @@ export default function Chat() {
                         justifyContent: 'space-between',
                         fontSize: '12px',
                     }}>
-                        <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><span style={{ display: 'flex' }}>{Icons.clip}</span> {attachedFile.name}</span>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            {attachedFile.imageUrl ? (
+                                <img src={attachedFile.imageUrl} alt={attachedFile.name} style={{ width: '32px', height: '32px', borderRadius: '4px', objectFit: 'cover' }} />
+                            ) : (
+                                <span style={{ display: 'flex' }}>{Icons.clip}</span>
+                            )}
+                            {attachedFile.name}
+                        </span>
                         <button
                             onClick={() => setAttachedFile(null)}
                             style={{ background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: '14px' }}

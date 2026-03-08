@@ -1,5 +1,6 @@
 """File upload API for chat — saves files to agent workspace and extracts text."""
 
+import base64
 import os
 import uuid
 from pathlib import Path
@@ -21,7 +22,13 @@ TEXT_EXTENSIONS = {
     ".ini", ".cfg", ".conf", ".env", ".toml",
 }
 OFFICE_EXTENSIONS = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 EXTRACTABLE = TEXT_EXTENSIONS | OFFICE_EXTENSIONS
+
+MIME_MAP = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+}
 
 
 def extract_text(file_path: Path, extension: str) -> str:
@@ -140,7 +147,17 @@ async def upload_file(
         save_path.write_bytes(content)
 
     # Extract text (only for known formats)
-    if ext in EXTRACTABLE:
+    is_image = ext in IMAGE_EXTENSIONS
+    image_data_url = ""
+    if is_image:
+        # For images: generate base64 data URL for vision models
+        if len(content) > 10 * 1024 * 1024:  # 10MB limit
+            raise HTTPException(status_code=400, detail="Image too large (max 10MB)")
+        mime = MIME_MAP.get(ext, "image/png")
+        b64 = base64.b64encode(content).decode("ascii")
+        image_data_url = f"data:{mime};base64,{b64}"
+        extracted = f"[图片文件: {file.filename}，需要视觉模型分析]"
+    elif ext in EXTRACTABLE:
         extracted = extract_text(save_path, ext)
     else:
         extracted = f"[文件已保存，格式 {ext} 暂不支持文本提取，Agent 可通过 read_document 工具读取]"
@@ -155,4 +172,6 @@ async def upload_file(
         "size": len(content),
         "extracted_text": extracted,
         "workspace_path": workspace_path,
+        "is_image": is_image,
+        "image_data_url": image_data_url,
     }

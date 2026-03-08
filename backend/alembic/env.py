@@ -19,6 +19,7 @@ from app.models.llm import LLMModel  # noqa: F401
 from app.models.audit import AuditLog, ApprovalRequest, ChatMessage, EnterpriseInfo  # noqa: F401
 from app.models.skill import Skill, SkillFile  # noqa: F401
 from app.models.chat_session import ChatSession  # noqa: F401
+from app.models.participant import Participant  # noqa: F401
 
 config = context.config
 settings = get_settings()

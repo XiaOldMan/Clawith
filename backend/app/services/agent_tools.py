@@ -1501,8 +1501,11 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
 
     try:
         from app.models.agent import Agent
-        from app.models.message import Message
+        from app.models.audit import ChatMessage
+        from app.models.chat_session import ChatSession
+        from app.models.participant import Participant
         from app.models.system_settings import SystemSetting
+        from datetime import datetime, timezone
 
         async with async_session() as db:
             # Read max_rounds from system settings
@@ -1527,6 +1530,42 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
             # Check if target agent has expired
             if target.is_expired or (target.expires_at and datetime.now(timezone.utc) >= target.expires_at):
                 return f"⚠️ {target.name} is currently unavailable — their service period has ended. Please contact the platform administrator."
+
+            # Get Participant IDs for both agents
+            src_part_r = await db.execute(select(Participant).where(Participant.type == "agent", Participant.ref_id == from_agent_id))
+            src_participant = src_part_r.scalar_one_or_none()
+            tgt_part_r = await db.execute(select(Participant).where(Participant.type == "agent", Participant.ref_id == target.id))
+            tgt_participant = tgt_part_r.scalar_one_or_none()
+
+            # Find or create ChatSession for this agent pair
+            # Use agent_id = source, peer_agent_id = target, source_channel = 'agent'
+            # Order the pair consistently so the same session is reused regardless of who initiates
+            session_agent_id = min(from_agent_id, target.id, key=str)
+            session_peer_id = max(from_agent_id, target.id, key=str)
+            sess_r = await db.execute(
+                select(ChatSession).where(
+                    ChatSession.agent_id == session_agent_id,
+                    ChatSession.peer_agent_id == session_peer_id,
+                    ChatSession.source_channel == "agent",
+                )
+            )
+            chat_session = sess_r.scalar_one_or_none()
+            if not chat_session:
+                # user_id = creator of the initiating agent (for backward compat)
+                owner_id = source_agent.creator_id if source_agent else from_agent_id
+                src_part_id = src_participant.id if src_participant else None
+                chat_session = ChatSession(
+                    agent_id=session_agent_id,
+                    user_id=owner_id,
+                    title=f"{source_name} ↔ {target.name}",
+                    source_channel="agent",
+                    participant_id=src_part_id,
+                    peer_agent_id=session_peer_id,
+                )
+                db.add(chat_session)
+                await db.flush()
+
+            session_id = str(chat_session.id)
 
             # Prepare LLM for both agents
             from app.services.agent_context import build_agent_context
@@ -1583,37 +1622,48 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                     return data["choices"][0].get("message", {}).get("content", "")
                 return ""
 
-            # Save a message record
-            async def save_msg(sender_id, receiver_id, content):
-                db.add(Message(
-                    sender_type="agent", sender_id=sender_id,
-                    receiver_type="agent", receiver_id=receiver_id,
-                    content=content, msg_type="text",
+            # Save a message as ChatMessage
+            async def save_msg(sender_agent_id, content, role):
+                part_r = await db.execute(select(Participant).where(Participant.type == "agent", Participant.ref_id == sender_agent_id))
+                part = part_r.scalar_one_or_none()
+                owner_id = source_agent.creator_id if source_agent else from_agent_id
+                db.add(ChatMessage(
+                    agent_id=session_agent_id,
+                    user_id=owner_id,
+                    role=role,
+                    content=content,
+                    conversation_id=session_id,
+                    participant_id=part.id if part else None,
                 ))
                 await db.commit()
 
             # -- Multi-turn conversation loop --
-            # conversation_messages tracks the dialogue from target's perspective
-            # (user = source agent, assistant = target agent)
             conversation_messages: list[dict] = []
 
-            # Load recent history
+            # Load recent history from ChatMessage
             hist_result = await db.execute(
-                select(Message)
+                select(ChatMessage)
                 .where(
-                    ((Message.sender_id == from_agent_id) & (Message.receiver_id == target.id)) |
-                    ((Message.sender_id == target.id) & (Message.receiver_id == from_agent_id))
+                    ChatMessage.conversation_id == session_id,
+                    ChatMessage.agent_id == session_agent_id,
                 )
-                .order_by(Message.created_at.desc())
+                .order_by(ChatMessage.created_at.desc())
                 .limit(6)
             )
             for m in reversed(hist_result.scalars().all()):
-                role = "user" if m.sender_id == from_agent_id else "assistant"
+                # Determine role from participant_id
+                if m.participant_id and src_participant and m.participant_id == src_participant.id:
+                    role = "user"
+                else:
+                    role = "assistant"
                 conversation_messages.append({"role": role, "content": m.content})
 
             # Add the initial message from source
             conversation_messages.append({"role": "user", "content": f"[From {source_name}] {message_text}"})
-            await save_msg(from_agent_id, target.id, message_text)
+            await save_msg(from_agent_id, message_text, "user")
+
+            # Update session timestamp
+            chat_session.last_message_at = datetime.now(timezone.utc)
 
             transcript = []  # Human-readable transcript
             transcript.append(f"📤 {source_name}: {message_text}")
@@ -1629,7 +1679,7 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 target_done = "[DONE]" in target_reply
                 clean_reply = target_reply.replace("[DONE]", "").strip()
 
-                await save_msg(target.id, from_agent_id, clean_reply)
+                await save_msg(target.id, clean_reply, "assistant")
                 conversation_messages.append({"role": "assistant", "content": clean_reply})
                 transcript.append(f"💬 {target.name}: {clean_reply}")
 
@@ -1658,7 +1708,7 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 source_done = "[DONE]" in source_reply
                 clean_source = source_reply.replace("[DONE]", "").strip()
 
-                await save_msg(from_agent_id, target.id, clean_source)
+                await save_msg(from_agent_id, clean_source, "user")
                 conversation_messages.append({"role": "user", "content": clean_source})
                 transcript.append(f"📤 {source_name}: {clean_source}")
 

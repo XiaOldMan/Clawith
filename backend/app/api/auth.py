@@ -94,6 +94,14 @@ async def register(data: UserRegister, db: AsyncSession = Depends(get_db)):
     db.add(user)
     await db.flush()
 
+    # Auto-create Participant identity for the new user
+    from app.models.participant import Participant
+    db.add(Participant(
+        type="user", ref_id=user.id,
+        display_name=user.display_name, avatar_url=user.avatar_url,
+    ))
+    await db.flush()
+
     # Increment invitation code usage
     if invitation_code_obj:
         invitation_code_obj.used_count += 1

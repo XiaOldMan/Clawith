@@ -50,6 +50,7 @@ async def add_llm_model(
         label=data.label,
         max_tokens_per_day=data.max_tokens_per_day,
         enabled=data.enabled,
+        supports_vision=data.supports_vision,
     )
     db.add(model)
     await db.flush()
@@ -89,6 +90,7 @@ async def update_llm_model(
     if data.api_key:  # Only update API key if provided (not empty)
         model.api_key_encrypted = data.api_key
     model.enabled = data.enabled
+    model.supports_vision = data.supports_vision
     await db.flush()
     return LLMModelOut.model_validate(model)
 

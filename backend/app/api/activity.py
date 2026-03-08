@@ -57,8 +57,8 @@ async def list_conversations(
     await check_agent_access(db, current_user, agent_id)
 
     from app.models.audit import ChatMessage
-    from app.models.message import Message
     from app.models.agent import Agent
+    from app.models.chat_session import ChatSession
 
     conversations = []
 
@@ -175,52 +175,38 @@ async def list_conversations(
                 "last_at": last_at.isoformat() if last_at else None,
             })
 
-    # 2. Agent-to-agent conversations (from Message table)
-    # Messages where this agent is sender OR receiver
-    agent_partners = set()
-    sent_q = await db.execute(
-        select(Message.receiver_id)
-        .where(Message.sender_type == "agent", Message.sender_id == agent_id, Message.receiver_type == "agent")
-        .distinct()
+    # 2. Agent-to-agent conversations (from ChatSession with peer_agent_id)
+    agent_sessions_q = await db.execute(
+        select(ChatSession).where(
+            ChatSession.source_channel == "agent",
+            (ChatSession.agent_id == agent_id) | (ChatSession.peer_agent_id == agent_id),
+        )
     )
-    for r in sent_q.fetchall():
-        agent_partners.add(r[0])
-
-    recv_q = await db.execute(
-        select(Message.sender_id)
-        .where(Message.receiver_type == "agent", Message.receiver_id == agent_id, Message.sender_type == "agent")
-        .distinct()
-    )
-    for r in recv_q.fetchall():
-        agent_partners.add(r[0])
-
-    for partner_id in agent_partners:
+    for sess in agent_sessions_q.scalars().all():
+        # Determine the partner agent
+        partner_id = sess.peer_agent_id if sess.agent_id == agent_id else sess.agent_id
         agent_r = await db.execute(select(Agent.name).where(Agent.id == partner_id))
         partner_name = agent_r.scalar_one_or_none() or "未知数字员工"
 
+        # Count messages in this session
         stats_q = await db.execute(
-            select(func.count(Message.id), func.max(Message.created_at))
-            .where(
-                ((Message.sender_id == agent_id) & (Message.receiver_id == partner_id)) |
-                ((Message.sender_id == partner_id) & (Message.receiver_id == agent_id))
-            )
+            select(func.count(ChatMessage.id), func.max(ChatMessage.created_at))
+            .where(ChatMessage.conversation_id == str(sess.id))
         )
         stats = stats_q.fetchone()
         cnt = stats[0] if stats else 0
         last_at = stats[1] if stats else None
 
+        # Get last message
         last_msg_r = await db.execute(
-            select(Message.content)
-            .where(
-                ((Message.sender_id == agent_id) & (Message.receiver_id == partner_id)) |
-                ((Message.sender_id == partner_id) & (Message.receiver_id == agent_id))
-            )
-            .order_by(Message.created_at.desc()).limit(1)
+            select(ChatMessage.content)
+            .where(ChatMessage.conversation_id == str(sess.id))
+            .order_by(ChatMessage.created_at.desc()).limit(1)
         )
         last_content = last_msg_r.scalar_one_or_none() or ""
 
         conversations.append({
-            "conv_id": f"agent_{min(str(agent_id), str(partner_id))}_{max(str(agent_id), str(partner_id))}",
+            "conv_id": str(sess.id),
             "partner_type": "agent",
             "partner_id": str(partner_id),
             "partner_name": f"🤖 {partner_name}",
@@ -267,36 +253,32 @@ async def get_conversation_messages(
                 "content": content,
                 "created_at": m.created_at.isoformat() if m.created_at else None,
             })
-    elif conv_id.startswith("agent_"):
-        from app.models.message import Message as Msg
+    elif conv_id.startswith("agent_") or len(conv_id) == 36:
+        # Agent-to-agent conversation — conv_id is the ChatSession UUID
+        from app.models.audit import ChatMessage
         from app.models.agent import Agent
-        # Extract partner from conv_id
-        parts = conv_id.split("_")
-        # conv_id format: agent_{uuid1}_{uuid2}
-        id1 = uuid.UUID(parts[1])
-        id2 = uuid.UUID("_".join(parts[2:]))  # uuid may contain underscores... no, UUIDs use hyphens
-        partner_id = id2 if id1 == agent_id else id1
+        from app.models.participant import Participant
 
         result = await db.execute(
-            select(Msg)
-            .where(
-                ((Msg.sender_id == agent_id) & (Msg.receiver_id == partner_id)) |
-                ((Msg.sender_id == partner_id) & (Msg.receiver_id == agent_id))
-            )
-            .order_by(Msg.created_at.asc())
+            select(ChatMessage)
+            .where(ChatMessage.conversation_id == conv_id)
+            .order_by(ChatMessage.created_at.asc())
             .limit(limit)
         )
-        # Get agent names
         name_cache = {}
         for m in result.scalars().all():
-            if str(m.sender_id) not in name_cache:
-                r = await db.execute(select(Agent.name).where(Agent.id == m.sender_id))
-                name_cache[str(m.sender_id)] = r.scalar_one_or_none() or "未知"
-            role = "assistant" if m.sender_id == agent_id else "user"
+            # Determine sender name from participant_id
+            sender_name = "未知"
+            if m.participant_id:
+                pid_str = str(m.participant_id)
+                if pid_str not in name_cache:
+                    p_r = await db.execute(select(Participant.display_name).where(Participant.id == m.participant_id))
+                    name_cache[pid_str] = p_r.scalar_one_or_none() or "未知"
+                sender_name = name_cache[pid_str]
             messages.append({
                 "id": str(m.id),
-                "role": role,
-                "sender_name": name_cache.get(str(m.sender_id), "未知"),
+                "role": m.role,
+                "sender_name": sender_name,
                 "content": m.content,
                 "created_at": m.created_at.isoformat() if m.created_at else None,
             })

@@ -599,14 +599,16 @@ export default function AgentDetail() {
         const res = await fetch(`/api/agents/${id}/sessions/${sess.id}/messages`, { headers: { Authorization: `Bearer ${tkn}` } });
         if (res.ok) {
             const msgs = await res.json();
-            if (sess.user_id === String(currentUser?.id)) {
+            // Agent-to-agent sessions are always read-only
+            const isAgentSession = sess.source_channel === 'agent' || sess.participant_type === 'agent';
+            if (!isAgentSession && sess.user_id === String(currentUser?.id)) {
                 // Own session: load into chatMessages so WS can append new replies seamlessly
                 setChatMessages(msgs.map((m: any) => parseChatMsg({
                     role: m.role, content: m.content,
                     ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult }),
                 })));
             } else {
-                // Other user's session: read-only view
+                // Other user's session or agent-to-agent: read-only view
                 setHistoryMsgs(msgs);
             }
         }
@@ -650,12 +652,12 @@ export default function AgentDetail() {
         } catch (e) { alert('Failed: ' + e); }
         setExpirySaving(false);
     };
-    interface ChatMsg { role: 'user' | 'assistant' | 'tool_call'; content: string; fileName?: string; toolName?: string; toolArgs?: any; toolStatus?: 'running' | 'done'; toolResult?: string; thinking?: string; }
+    interface ChatMsg { role: 'user' | 'assistant' | 'tool_call'; content: string; fileName?: string; toolName?: string; toolArgs?: any; toolStatus?: 'running' | 'done'; toolResult?: string; thinking?: string; imageUrl?: string; }
     const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
     const [chatInput, setChatInput] = useState('');
     const [wsConnected, setWsConnected] = useState(false);
     const [uploading, setUploading] = useState(false);
-    const [attachedFile, setAttachedFile] = useState<{ name: string; text: string; path?: string } | null>(null);
+    const [attachedFile, setAttachedFile] = useState<{ name: string; text: string; path?: string; imageUrl?: string } | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const chatEndRef = useRef<HTMLDivElement>(null);
     const chatContainerRef = useRef<HTMLDivElement>(null);
@@ -735,7 +737,9 @@ export default function AgentDetail() {
     useEffect(() => {
         if (!id || !token || activeTab !== 'chat') return;
         if (!activeSession) return;  // wait for session to be set
-        // Only connect WS for own sessions
+        // Only connect WS for own sessions (not other users' and not agent-to-agent)
+        const isAgentSession = activeSession.source_channel === 'agent' || activeSession.participant_type === 'agent';
+        if (isAgentSession) return;
         if (activeSession.user_id && currentUser && activeSession.user_id !== String(currentUser.id)) return;
         let cancelled = false;
         const sessionParam = activeSession?.id ? `&session_id=${activeSession.id}` : '';
@@ -842,14 +846,20 @@ export default function AgentDetail() {
         let userMsg = chatInput.trim();
         let contentForLLM = userMsg;
         if (attachedFile) {
-            const wsPath = attachedFile.path || '';
-            const codePath = wsPath.replace(/^workspace\//, '');
-            const fileLoc = wsPath ? `\nFile location: ${wsPath} (for read_file/read_document tools)\nIn execute_code, use relative path: "${codePath}" (working directory is workspace/)` : '';
-            const fc = `[File: ${attachedFile.name}]${fileLoc}\n\n${attachedFile.text}`;
-            contentForLLM = userMsg ? `${fc}\n\nQuestion: ${userMsg}` : `Please analyze this file:\n\n${fc}`;
-            userMsg = userMsg || `⌇ ${attachedFile.name}`;
+            if (attachedFile.imageUrl) {
+                const imageMarker = `[image_data:${attachedFile.imageUrl}]`;
+                contentForLLM = userMsg ? `${imageMarker}\n${userMsg}` : `${imageMarker}\n请分析这张图片`;
+                userMsg = userMsg || `[图片] ${attachedFile.name}`;
+            } else {
+                const wsPath = attachedFile.path || '';
+                const codePath = wsPath.replace(/^workspace\//, '');
+                const fileLoc = wsPath ? `\nFile location: ${wsPath} (for read_file/read_document tools)\nIn execute_code, use relative path: "${codePath}" (working directory is workspace/)` : '';
+                const fc = `[File: ${attachedFile.name}]${fileLoc}\n\n${attachedFile.text}`;
+                contentForLLM = userMsg ? `${fc}\n\nQuestion: ${userMsg}` : `Please analyze this file:\n\n${fc}`;
+                userMsg = userMsg || `⌆ ${attachedFile.name}`;
+            }
         }
-        setChatMessages(prev => [...prev, { role: 'user', content: userMsg, fileName: attachedFile?.name }]);
+        setChatMessages(prev => [...prev, { role: 'user', content: userMsg, fileName: attachedFile?.name, imageUrl: attachedFile?.imageUrl }]);
         wsRef.current.send(JSON.stringify({ content: contentForLLM, display_content: userMsg, file_name: attachedFile?.name || '' }));
         setChatInput(''); setAttachedFile(null);
     };
@@ -861,7 +871,7 @@ export default function AgentDetail() {
             const fd = new FormData(); fd.append('file', file); if (id) fd.append('agent_id', id);
             const resp = await fetch('/api/chat/upload', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd });
             if (!resp.ok) { const err = await resp.json(); alert(err.detail || t('agent.upload.failed')); return; }
-            const data = await resp.json(); setAttachedFile({ name: data.filename, text: data.extracted_text, path: data.workspace_path });
+            const data = await resp.json(); setAttachedFile({ name: data.filename, text: data.extracted_text, path: data.workspace_path, imageUrl: data.image_data_url || undefined });
         } catch (err) { alert(t('agent.upload.failed')); } finally { setUploading(false); if (fileInputRef.current) fileInputRef.current.value = ''; }
     };
 
@@ -2044,11 +2054,11 @@ export default function AgentDetail() {
                                     <div>No session selected</div>
                                     <button className="btn btn-secondary" onClick={createNewSession} style={{ fontSize: '12px' }}>Start a new session</button>
                                 </div>
-                            ) : activeSession.user_id && currentUser && activeSession.user_id !== String(currentUser.id) ? (
-                                /* ── Read-only history view (other user's session) ── */
+                            ) : (activeSession.user_id && currentUser && activeSession.user_id !== String(currentUser.id)) || activeSession.source_channel === 'agent' || activeSession.participant_type === 'agent' ? (
+                                /* ── Read-only history view (other user's session or agent-to-agent) ── */
                                 <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '12px', padding: '4px 8px', background: 'var(--bg-secondary)', borderRadius: '4px', display: 'inline-block' }}>
-                                        Read-only · {activeSession.username || 'User'}
+                                        {activeSession.source_channel === 'agent' ? `🤖 Agent Conversation · ${activeSession.username || 'Agents'}` : `Read-only · ${activeSession.username || 'User'}`}
                                     </div>
                                     {historyMsgs.map((m: any, i: number) => {
                                         if (m.role === 'tool_call') {
@@ -2067,8 +2077,9 @@ export default function AgentDetail() {
                                         }
                                         return (
                                             <div key={i} style={{ display: 'flex', flexDirection: m.role === 'assistant' ? 'row' : 'row-reverse', gap: '8px', marginBottom: '8px' }}>
-                                                <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: m.role === 'assistant' ? 'var(--bg-elevated)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', flexShrink: 0, color: 'var(--text-secondary)', fontWeight: 600 }}>{m.role === 'assistant' ? 'A' : 'U'}</div>
+                                                <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: m.role === 'assistant' ? 'var(--bg-elevated)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', flexShrink: 0, color: 'var(--text-secondary)', fontWeight: 600 }}>{m.sender_name ? m.sender_name[0] : (m.role === 'assistant' ? 'A' : 'U')}</div>
                                                 <div style={{ maxWidth: '70%', padding: '8px 12px', borderRadius: '12px', background: m.role === 'assistant' ? 'var(--bg-secondary)' : 'rgba(16,185,129,0.1)', fontSize: '13px', lineHeight: '1.5', wordBreak: 'break-word' }}>
+                                                    {m.sender_name && <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '2px', fontWeight: 600 }}>🤖 {m.sender_name}</div>}
                                                     {(() => {
                                                         const pm = parseChatMsg({ role: m.role as ChatMsg['role'], content: m.content || '' });
                                                         const fe = pm.fileName?.split('.').pop()?.toLowerCase() ?? '';
@@ -2123,6 +2134,12 @@ export default function AgentDetail() {
                                                     <div style={{ maxWidth: '70%', padding: '8px 12px', borderRadius: '12px', background: msg.role === 'assistant' ? 'var(--bg-secondary)' : 'rgba(16,185,129,0.1)', fontSize: '13px', lineHeight: '1.5', wordBreak: 'break-word' }}>
                                                         {msg.fileName && (() => {
                                                             const fe = msg.fileName!.split('.').pop()?.toLowerCase() ?? '';
+                                                            const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(fe);
+                                                            if (isImage && msg.imageUrl) {
+                                                                return (<div style={{ marginBottom: '4px' }}>
+                                                                    <img src={msg.imageUrl} alt={msg.fileName} style={{ maxWidth: '200px', maxHeight: '150px', borderRadius: '8px', border: '1px solid var(--border-subtle)' }} />
+                                                                </div>);
+                                                            }
                                                             const fi = fe === 'pdf' ? '📄' : (fe === 'csv' || fe === 'xlsx' || fe === 'xls') ? '📊' : (fe === 'docx' || fe === 'doc') ? '📝' : '📎';
                                                             return (<div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', background: 'rgba(0,0,0,0.08)', borderRadius: '6px', padding: '4px 8px', marginBottom: msg.content ? '4px' : '0', fontSize: '11px', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}><span>{fi}</span><span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span></div>);
                                                         })()}

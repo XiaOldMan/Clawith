@@ -95,6 +95,7 @@ async def call_llm(
     on_chunk=None,
     on_tool_call=None,
     on_thinking=None,
+    supports_vision=False,
 ) -> str:
     """Call LLM via OpenAI-compatible API with function-calling tool loop.
     
@@ -131,6 +132,29 @@ async def call_llm(
 
     api_messages = [{"role": "system", "content": system_prompt}]
     api_messages.extend(messages)
+
+    # ── Vision format conversion ──
+    # If the model supports vision, convert image markers in user messages
+    # to OpenAI Vision API format: content becomes an array of parts.
+    if supports_vision:
+        import re as _re_v
+        for i, msg in enumerate(api_messages):
+            if msg.get("role") != "user" or not isinstance(msg.get("content"), str):
+                continue
+            content_str = msg["content"]
+            # Find [image_data:data:image/...;base64,...] markers
+            pattern = r'\[image_data:(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)\]'
+            images = _re_v.findall(pattern, content_str)
+            if not images:
+                continue
+            # Build content array
+            text = _re_v.sub(pattern, '', content_str).strip()
+            parts = []
+            for img_url in images:
+                parts.append({"type": "image_url", "image_url": {"url": img_url}})
+            if text:
+                parts.append({"type": "text", "text": text})
+            api_messages[i] = {**msg, "content": parts}
 
     # Determine base URL
     from app.services.llm_utils import get_provider_base_url, get_tool_params, get_max_tokens
@@ -662,6 +686,7 @@ async def websocket_chat(
                         on_chunk=stream_to_ws,
                         on_tool_call=tool_call_to_ws,
                         on_thinking=thinking_to_ws,
+                        supports_vision=getattr(llm_model, 'supports_vision', False),
                     )
                     print(f"[WS] LLM response: {assistant_response[:80]}")
 
