@@ -2150,36 +2150,65 @@ function AgentDetailInner() {
                                                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' }}>
                                                                         {msgs.map((msg: any, mi: number) => {
                                                                             if (msg.role === 'tool_call') {
-                                                                                let parsed: any = {};
-                                                                                try { parsed = JSON.parse(msg.content || '{}'); } catch { }
+                                                                                const tName = msg.toolName || (() => { try { return JSON.parse(msg.content || '{}').name; } catch { return ''; } })() || 'tool';
+                                                                                const tArgs = msg.toolArgs || (() => { try { return JSON.parse(msg.content || '{}').args; } catch { return {}; } })();
+                                                                                const tResult = msg.toolResult || '';
+                                                                                const argsStr = typeof tArgs === 'string' ? tArgs : JSON.stringify(tArgs || {});
                                                                                 return (
-                                                                                    <div key={mi} style={{
-                                                                                        padding: '6px 10px', borderRadius: '6px',
-                                                                                        background: 'var(--bg-secondary)',
-                                                                                        borderLeft: '2px solid var(--accent-primary)',
-                                                                                        fontSize: '11px',
-                                                                                    }}>
-                                                                                        <span style={{ fontWeight: 600, color: 'var(--accent-primary)' }}>{parsed.name || 'tool'}</span>
-                                                                                        <span style={{ color: 'var(--text-tertiary)', marginLeft: '6px' }}>
-                                                                                            {JSON.stringify(parsed.args || {}).substring(0, 100)}
-                                                                                        </span>
-                                                                                    </div>
+                                                                                    <details key={mi} style={{ borderRadius: '6px', overflow: 'hidden' }}>
+                                                                                        <summary style={{
+                                                                                            padding: '6px 10px', borderRadius: '6px',
+                                                                                            background: 'var(--bg-secondary)',
+                                                                                            borderLeft: '2px solid var(--accent-primary)',
+                                                                                            fontSize: '11px', cursor: 'pointer', listStyle: 'none',
+                                                                                            display: 'flex', alignItems: 'center', gap: '6px',
+                                                                                        }}>
+                                                                                            <span style={{ fontWeight: 600, color: 'var(--accent-primary)' }}>{tName}</span>
+                                                                                            <span style={{ color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                                                                {argsStr.substring(0, 80)}{argsStr.length > 80 ? '...' : ''}
+                                                                                            </span>
+                                                                                        </summary>
+                                                                                        <div style={{
+                                                                                            padding: '6px 10px', fontSize: '11px',
+                                                                                            background: 'var(--bg-secondary)', borderLeft: '2px solid var(--accent-primary)',
+                                                                                            fontFamily: 'monospace', whiteSpace: 'pre-wrap', maxHeight: '200px', overflow: 'auto',
+                                                                                        }}>
+                                                                                            <div style={{ color: 'var(--text-tertiary)', marginBottom: '4px' }}>Args:</div>
+                                                                                            <div style={{ color: 'var(--text-secondary)' }}>{argsStr}</div>
+                                                                                            {tResult && (
+                                                                                                <>
+                                                                                                    <div style={{ color: 'var(--text-tertiary)', marginTop: '6px', marginBottom: '4px' }}>Result:</div>
+                                                                                                    <div style={{ color: 'var(--text-secondary)' }}>{typeof tResult === 'string' ? tResult.substring(0, 500) : JSON.stringify(tResult).substring(0, 500)}</div>
+                                                                                                </>
+                                                                                            )}
+                                                                                        </div>
+                                                                                    </details>
                                                                                 );
                                                                             }
                                                                             if (msg.role === 'tool_result') {
-                                                                                let parsed: any = {};
-                                                                                try { parsed = JSON.parse(msg.content || '{}'); } catch { }
+                                                                                const tName = msg.toolName || (() => { try { return JSON.parse(msg.content || '{}').name; } catch { return ''; } })() || 'result';
+                                                                                const tResult = msg.toolResult || msg.content || '';
+                                                                                const resultStr = typeof tResult === 'string' ? tResult : JSON.stringify(tResult);
                                                                                 return (
-                                                                                    <div key={mi} style={{
-                                                                                        padding: '6px 10px', borderRadius: '6px',
-                                                                                        background: 'var(--bg-secondary)',
-                                                                                        borderLeft: '2px solid var(--success, #10b981)',
-                                                                                        fontSize: '11px', color: 'var(--text-secondary)',
-                                                                                        maxHeight: '100px', overflow: 'auto',
-                                                                                    }}>
-                                                                                        <span style={{ fontWeight: 500 }}>{parsed.name || 'result'}:</span>{' '}
-                                                                                        <span>{(parsed.result || '').substring(0, 200)}</span>
-                                                                                    </div>
+                                                                                    <details key={mi} style={{ borderRadius: '6px', overflow: 'hidden' }}>
+                                                                                        <summary style={{
+                                                                                            padding: '6px 10px', borderRadius: '6px',
+                                                                                            background: 'var(--bg-secondary)',
+                                                                                            borderLeft: '2px solid var(--success, #10b981)',
+                                                                                            fontSize: '11px', color: 'var(--text-secondary)', cursor: 'pointer', listStyle: 'none',
+                                                                                        }}>
+                                                                                            <span style={{ fontWeight: 500 }}>{tName}:</span>{' '}
+                                                                                            <span>{resultStr.substring(0, 120)}{resultStr.length > 120 ? '...' : ''}</span>
+                                                                                        </summary>
+                                                                                        <div style={{
+                                                                                            padding: '6px 10px', fontSize: '11px',
+                                                                                            background: 'var(--bg-secondary)', borderLeft: '2px solid var(--success, #10b981)',
+                                                                                            fontFamily: 'monospace', whiteSpace: 'pre-wrap', maxHeight: '200px', overflow: 'auto',
+                                                                                            color: 'var(--text-secondary)',
+                                                                                        }}>
+                                                                                            {resultStr}
+                                                                                        </div>
+                                                                                    </details>
                                                                                 );
                                                                             }
                                                                             if (msg.role === 'assistant') {
