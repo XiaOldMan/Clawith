@@ -1951,7 +1951,7 @@ function AgentDetailInner() {
                                 )}
                                 {showAllFocus && activeFocusItems.length > SECTION_PAGE_SIZE && (
                                     <button
-                                        onClick={() => setShowAllFocus(false)}
+                                        onClick={(e) => { setShowAllFocus(false); e.currentTarget.closest('.card')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }}
                                         className="btn btn-ghost"
                                         style={{ width: '100%', fontSize: '12px', color: 'var(--text-tertiary)', padding: '8px', marginTop: '4px' }}
                                     >
@@ -2047,7 +2047,7 @@ function AgentDetailInner() {
                                     </div>
                                     {standaloneTriggers.length > SECTION_PAGE_SIZE && (
                                         <button
-                                            onClick={() => setShowAllTriggers(!showAllTriggers)}
+                                            onClick={(e) => { const collapse = showAllTriggers; setShowAllTriggers(!showAllTriggers); if (collapse) e.currentTarget.closest('.card')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }}
                                             className="btn btn-ghost"
                                             style={{ width: '100%', fontSize: '12px', color: 'var(--text-tertiary)', padding: '8px', marginTop: '4px' }}
                                         >
@@ -2248,7 +2248,7 @@ function AgentDetailInner() {
                                         </div>
                                         {pulseSessions.length > SECTION_PAGE_SIZE && (
                                             <button
-                                                onClick={() => setShowAllReflections(!showAllReflections)}
+                                                onClick={(e) => { const collapse = showAllReflections; setShowAllReflections(!showAllReflections); if (collapse) e.currentTarget.closest('.card')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }}
                                                 className="btn btn-ghost"
                                                 style={{ width: '100%', fontSize: '12px', color: 'var(--text-tertiary)', padding: '8px', marginTop: '4px' }}
                                             >
