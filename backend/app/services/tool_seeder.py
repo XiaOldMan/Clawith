@@ -1,5 +1,6 @@
 """Seed builtin tools into the database on startup."""
 
+from loguru import logger
 from sqlalchemy import select
 from app.database import async_session
 from app.models.tool import Tool
@@ -170,7 +171,7 @@ BUILTIN_TOOLS = [
     {
         "name": "send_channel_file",
         "display_name": "Send File",
-        "description": "Send a file to the user via the current communication channel (Feishu, Slack, Discord, or web).",
+        "description": "Send a file to a specific person or back to the current conversation. If member_name is provided, the system resolves the recipient across all connected channels (Feishu, Slack, etc.) and delivers the file via the appropriate channel.",
         "category": "communication",
         "icon": "📎",
         "is_default": True,
@@ -178,6 +179,8 @@ BUILTIN_TOOLS = [
             "type": "object",
             "properties": {
                 "file_path": {"type": "string", "description": "Workspace-relative path to the file"},
+                "member_name": {"type": "string", "description": "Name of the person to send the file to. The system looks up this person across all configured channels and delivers via the appropriate one."},
+                "message": {"type": "string", "description": "Optional message to accompany the file"},
             },
             "required": ["file_path"],
         },
@@ -862,7 +865,7 @@ async def seed_builtin_tools():
                 await db.flush()  # get tool.id
                 if t["is_default"]:
                     new_tool_ids.append(tool.id)
-                print(f"[ToolSeeder] Created builtin tool: {t['name']}")
+                logger.info(f"[ToolSeeder] Created builtin tool: {t['name']}")
             else:
                 # Sync fields that may evolve
                 updated_fields = []
@@ -884,8 +887,11 @@ async def seed_builtin_tools():
                 if not existing.config and t.get("config"):
                     existing.config = t["config"]
                     updated_fields.append("config")
+                if existing.parameters_schema != t["parameters_schema"]:
+                    existing.parameters_schema = t["parameters_schema"]
+                    updated_fields.append("parameters_schema")
                 if updated_fields:
-                    print(f"[ToolSeeder] Updated {', '.join(updated_fields)}: {t['name']}")
+                    logger.info(f"[ToolSeeder] Updated {', '.join(updated_fields)}: {t['name']}")
 
         # Auto-assign new default tools to all existing agents
         if new_tool_ids:
@@ -902,7 +908,7 @@ async def seed_builtin_tools():
                     )
                     if not check.scalar_one_or_none():
                         db.add(AgentTool(agent_id=agent_id, tool_id=tool_id, enabled=True))
-            print(f"[ToolSeeder] Auto-assigned {len(new_tool_ids)} new tools to {len(agent_ids)} agents")
+            logger.info(f"[ToolSeeder] Auto-assigned {len(new_tool_ids)} new tools to {len(agent_ids)} agents")
 
         # Remove obsolete tools that have been replaced
         OBSOLETE_TOOLS = ["bing_search", "read_webpage", "manage_tasks"]
@@ -911,10 +917,10 @@ async def seed_builtin_tools():
             obsolete = result.scalar_one_or_none()
             if obsolete:
                 await db.delete(obsolete)
-                print(f"[ToolSeeder] Removed obsolete tool: {obsolete_name}")
+                logger.info(f"[ToolSeeder] Removed obsolete tool: {obsolete_name}")
 
         await db.commit()
-        print("[ToolSeeder] Builtin tools seeded")
+        logger.info("[ToolSeeder] Builtin tools seeded")
 
 
 # ── Atlassian Rovo MCP Server Integration ──────────────────────────────────
@@ -985,7 +991,7 @@ async def seed_atlassian_rovo_config():
             )
             db.add(tool)
             await db.commit()
-            print("[ToolSeeder] Created Atlassian Rovo config tool")
+            logger.info("[ToolSeeder] Created Atlassian Rovo config tool")
         else:
             updated = False
             if existing.config_schema != t["config_schema"]:
@@ -1000,7 +1006,7 @@ async def seed_atlassian_rovo_config():
                 updated = True
             if updated:
                 await db.commit()
-                print("[ToolSeeder] Updated Atlassian Rovo config tool")
+                logger.info("[ToolSeeder] Updated Atlassian Rovo config tool")
 
 
 async def get_atlassian_api_key() -> str:
