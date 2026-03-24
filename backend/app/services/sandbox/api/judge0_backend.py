@@ -1,11 +1,14 @@
 """Judge0 API-based sandbox backend."""
 
+import logging
 import time
 
 import httpx
 
 from app.services.sandbox.base import BaseSandboxBackend, ExecutionResult, SandboxCapabilities
 from app.services.sandbox.config import SandboxConfig
+
+logger = logging.getLogger(__name__)
 
 # Judge0 language IDs
 _JUDGE0_LANGUAGE_IDS = {
@@ -185,6 +188,7 @@ class Judge0Backend(BaseSandboxBackend):
 
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
+            logger.exception(f"[Judge0] Execution error")
             return ExecutionResult(
                 success=False,
                 stdout="",

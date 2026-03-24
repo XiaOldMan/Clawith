@@ -1,6 +1,7 @@
 """Local subprocess-based sandbox backend."""
 
 import asyncio
+from loguru import logger
 import os
 import time
 from pathlib import Path
@@ -8,48 +9,81 @@ from pathlib import Path
 from app.services.sandbox.base import BaseSandboxBackend, ExecutionResult, SandboxCapabilities
 from app.services.sandbox.config import SandboxConfig
 
+
 # Security patterns - reused from agent_tools.py
-_DANGEROUS_BASH = [
+_DANGEROUS_BASH_ALWAYS = [
     "rm -rf /", "rm -rf ~", "sudo ", "mkfs", "dd if=",
     ":(){ :", "chmod 777 /", "chown ", "shutdown", "reboot",
-    "curl ", "wget ", "nc ", "ncat ", "ssh ", "scp ",
     "python3 -c", "python -c",
 ]
 
-_DANGEROUS_PYTHON_IMPORTS = [
+_DANGEROUS_BASH_NETWORK = [
+    "curl ", "wget ", "nc ", "ncat ", "ssh ", "scp ",
+]
+
+_DANGEROUS_PYTHON_IMPORTS_ALWAYS = [
     "subprocess", "shutil.rmtree", "os.system", "os.popen",
     "os.exec", "os.spawn",
+]
+
+_DANGEROUS_PYTHON_IMPORTS_NETWORK = [
     "socket", "http.client", "urllib.request", "requests",
     "ftplib", "smtplib", "telnetlib", "ctypes",
     "__import__", "importlib",
 ]
 
-_DANGEROUS_NODE = [
+_DANGEROUS_NODE_ALWAYS = [
     "child_process", "fs.rmSync", "fs.rmdirSync", "process.exit",
+]
+
+_DANGEROUS_NODE_NETWORK = [
     "require('http')", "require('https')", "require('net')"
 ]
 
 
-def _check_code_safety(language: str, code: str) -> str | None:
+def _check_code_safety(language: str, code: str, allow_network: bool = False) -> str | None:
     """Check code for dangerous patterns. Returns error message if unsafe, None if ok."""
     code_lower = code.lower()
 
     if language == "bash":
-        for pattern in _DANGEROUS_BASH:
+        # Always check dangerous patterns
+        for pattern in _DANGEROUS_BASH_ALWAYS:
             if pattern.lower() in code_lower:
+                logger.warning(f"Blocked: dangerous command detected ({pattern.strip()})")
                 return f"Blocked: dangerous command detected ({pattern.strip()})"
+        # Network commands only when network is not allowed
+        if not allow_network:
+            for pattern in _DANGEROUS_BASH_NETWORK:
+                if pattern.lower() in code_lower:
+                    logger.warning(f"Blocked: network command not allowed ({pattern.strip()})")        
+                    return f"Blocked: network command not allowed ({pattern.strip()})"
         if "../../" in code:
             return "Blocked: directory traversal not allowed"
 
     elif language == "python":
-        for pattern in _DANGEROUS_PYTHON_IMPORTS:
+        # Always check dangerous patterns
+        for pattern in _DANGEROUS_PYTHON_IMPORTS_ALWAYS:
             if pattern.lower() in code_lower:
-                return f"Blocked: unsafe operation detected ({pattern})"
+                logger.warning(f"Blocked: unsafe operation detected ({pattern.strip()})")
+                return f"Blocked: unsafe operation detected ({pattern.strip()})"
+        # Network imports only when network is not allowed
+        if not allow_network:
+            for pattern in _DANGEROUS_PYTHON_IMPORTS_NETWORK:
+                if pattern.lower() in code_lower:
+                    logger.warning(f"Blocked: network operation not allowed ({pattern.strip()})")
+                    return f"Blocked: network operation not allowed ({pattern.strip()})"
 
     elif language == "node":
-        for pattern in _DANGEROUS_NODE:
+        # Always check dangerous patterns
+        for pattern in _DANGEROUS_NODE_ALWAYS:
             if pattern.lower() in code_lower:
                 return f"Blocked: unsafe operation detected ({pattern})"
+        # Network requires only when network is not allowed
+        if not allow_network:
+            for pattern in _DANGEROUS_NODE_NETWORK:
+                if pattern.lower() in code_lower:
+                    logger.warning(f"Blocked: network operation not allowed ({pattern.strip()})")
+                    return f"Blocked: network operation not allowed ({pattern.strip()})"
 
     return None
 
@@ -110,8 +144,8 @@ class SubprocessBackend(BaseSandboxBackend):
                 error=f"Unsupported language: {language}. Use: python, bash, or node"
             )
 
-        # Security check
-        safety_error = _check_code_safety(language, code)
+        # Security check - pass allow_network config
+        safety_error = _check_code_safety(language, code, self.config.allow_network)
         if safety_error:
             return ExecutionResult(
                 success=False,
@@ -202,6 +236,7 @@ class SubprocessBackend(BaseSandboxBackend):
 
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
+            logger.exception(f"[Subprocess] Execution error")
             return ExecutionResult(
                 success=False,
                 stdout="",

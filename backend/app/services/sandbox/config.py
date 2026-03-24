@@ -64,10 +64,6 @@ class SandboxConfig(BaseModel):
         Returns:
             SandboxConfig 实例
         """
-        logger.info(f"[SandboxConfig.from_dict] Input config: {config}")
-        if fallback_config:
-            logger.info(f"[SandboxConfig.from_dict] Fallback config: type={fallback_config.type}, api_url={fallback_config.api_url}")
-
         def get_value(key: str, default=None, encrypt: bool = False):
             """获取配置值，优先从 config 读取，缺失则使用 fallback。"""
             value = config.get(key)
@@ -81,15 +77,13 @@ class SandboxConfig(BaseModel):
             if encrypt and value:
                 try:
                     from app.core.security import decrypt_data
-
                     from app.config import get_settings
 
                     settings = get_settings()
                     decrypted = decrypt_data(value, settings.SECRET_KEY)
-                    logger.info(f"[SandboxConfig.from_dict] Decrypted {key}: {value[:20]}... -> {decrypted[:10] if decrypted else '(empty)'}...")
                     value = decrypted
                 except Exception as e:
-                    logger.warning(f"[SandboxConfig.from_dict] Failed to decrypt {key}: {e}")
+                    logger.warning(f"[SandboxConfig] Failed to decrypt {key}: {e}")
                     # 解密失败，使用 fallback
                     if fallback_config:
                         value = getattr(fallback_config, key, default)
@@ -115,5 +109,4 @@ class SandboxConfig(BaseModel):
             default_timeout=get_value("default_timeout", 30),
             max_timeout=get_value("max_timeout", 60),
         )
-        logger.info(f"[SandboxConfig.from_dict] Result: type={result.type}, api_url={result.api_url}, api_key={'***' if result.api_key else '(empty)'}")
         return result

@@ -25,8 +25,6 @@ def get_sandbox_backend(config: SandboxConfig) -> SandboxBackend:
     Raises:
         ValueError: If the sandbox type is unknown or not supported
     """
-    logger.info(f"[Registry] Creating sandbox backend: type={config.type}, api_url={config.api_url}, api_key={'***' if config.api_key else '(empty)'}")
-
     if not config.enabled:
         raise ValueError("Sandbox is disabled")
 
@@ -34,9 +32,7 @@ def get_sandbox_backend(config: SandboxConfig) -> SandboxBackend:
     if not backend_class:
         raise ValueError(f"Unknown sandbox type: {config.type}")
 
-    backend = backend_class(config)
-    logger.info(f"[Registry] Created backend: {backend.__class__.__name__}")
-    return backend
+    return backend_class(config)
 
 
 # Registry mapping - populated at module load time

@@ -1,10 +1,13 @@
 """E2B API-based sandbox backend."""
 
+import logging
 import time
 from typing import Any
 
 from app.services.sandbox.base import BaseSandboxBackend, ExecutionResult, SandboxCapabilities
 from app.services.sandbox.config import SandboxConfig
+
+logger = logging.getLogger(__name__)
 
 # Lazy import e2b to make it optional
 _e2b = None
@@ -29,7 +32,7 @@ def _get_e2b():
 _LANGUAGE_MAP = {
     "python": "python",
     "bash": "bash",
-    "node": "javascript",
+    "node": "node",
     "javascript": "javascript",
 }
 
@@ -55,7 +58,7 @@ class E2bBackend(BaseSandboxBackend):
         """Get or create E2B client."""
         e2b_lib = _get_e2b()
         if self._client is None:
-            self._client = e2b_lib.AsyncSandbox(self.config.api_key)
+            self._client = e2b_lib.AsyncSandbox
         return self._client
 
     def get_capabilities(self) -> SandboxCapabilities:
@@ -71,8 +74,8 @@ class E2bBackend(BaseSandboxBackend):
         """Check if E2B service is available."""
         try:
             e2b_lib = _get_e2b()
-            # Try to get sandbox template info
-            await e2b_lib.Sandbox.get_current()
+            # Try to list sandboxes to verify API is accessible
+            await e2b_lib.AsyncSandbox.list(api_key=self.config.api_key)
             return True
         except Exception:
             return False
@@ -90,7 +93,7 @@ class E2bBackend(BaseSandboxBackend):
 
         # Map language to E2B format
         e2b_language = _LANGUAGE_MAP.get(language, language)
-        if language not in _LANGUAGE_MAP and language not in ["python", "bash", "javascript", "node"]:
+        if language not in _LANGUAGE_MAP:
             return ExecutionResult(
                 success=False,
                 stdout="",
@@ -104,15 +107,33 @@ class E2bBackend(BaseSandboxBackend):
 
         try:
             # Create sandbox and run code
-            async with await e2b_lib.CodeSandbox.create(
+            async with await e2b_lib.AsyncSandbox.create(
                 api_key=self.config.api_key,
-                timeout=timeout * 1000,  # E2B uses milliseconds
+                timeout=timeout,
             ) as sandbox:
-                # Run the code
-                result = await sandbox.run_code(
-                    code,
-                    language=e2b_language,
-                )
+                # Build the command based on language
+                if e2b_language == "python":
+                    cmd = "python3"
+                    args = ["-c", code]
+                elif e2b_language == "bash":
+                    cmd = "bash"
+                    args = ["-c", code]
+                elif e2b_language in ("node", "javascript"):
+                    cmd = "node"
+                    args = ["-e", code]
+                else:
+                    return ExecutionResult(
+                        success=False,
+                        stdout="",
+                        stderr="",
+                        exit_code=1,
+                        duration_ms=int((time.time() - start_time) * 1000),
+                        error=f"Unsupported language: {language}"
+                    )
+
+                # Run the command - use string format for e2b
+                cmd_str = f"{cmd} {args[0]} '{args[1]}'"
+                result = await sandbox.commands.run(cmd_str)
 
             duration_ms = int((time.time() - start_time) * 1000)
 
@@ -122,12 +143,13 @@ class E2bBackend(BaseSandboxBackend):
                 stderr=result.stderr or "",
                 exit_code=result.exit_code or 0,
                 duration_ms=duration_ms,
-                error=result.error if result.error else None
+                error=None
             )
 
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
             error_msg = str(e)
+            logger.exception(f"[E2B] Execution error")
 
             # Handle timeout
             if "timeout" in error_msg.lower():

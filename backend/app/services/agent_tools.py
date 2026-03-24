@@ -98,7 +98,7 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
             _set_cached_tool_config(agent_id, tool_name, tool.config)
             return tool.config
 
-    logger.info(f"[ToolConfig] No DB config found for {tool_name}, agent_id={agent_id}")
+    logger.error(f"[ToolConfig] No DB config found for {tool_name}, agent_id={agent_id}")
     return None
 
 # ContextVar set by each channel handler so send_channel_file knows where to send
@@ -1192,7 +1192,7 @@ async def _execute_tool_direct(
                 return "Missing path"
             return _write_file(ws, path, content, tenant_id=_agent_tenant_id)
         elif tool_name == "execute_code":
-            return await _execute_code(ws, arguments)
+            return await _execute_code(agent_id, ws, arguments)
         elif tool_name == "web_search":
             return await _web_search(arguments)
         elif tool_name == "jina_search":
@@ -1206,6 +1206,7 @@ async def _execute_tool_direct(
         else:
             return f"Tool {tool_name} does not support post-approval execution"
     except Exception as e:
+        logger.exception(f"[DirectTool] Error executing {tool_name}: {e}")
         return f"Error executing {tool_name}: {e}"
 
 
@@ -1236,11 +1237,12 @@ async def execute_tool(
                     await _adb.commit()
                     if not result_check.get("allowed"):
                         level = result_check.get("level", "L3")
+                        logger.info(f"[Autonomy] Tool {tool_name} denied, level: {level}")
                         if level == "L3":
                             return f"⏳ This action requires approval. An approval request has been sent. Please wait for approval before retrying. (Approval ID: {result_check.get('approval_id', 'N/A')})"
                         return f"❌ Action denied: {result_check.get('message', 'unknown reason')}"
         except Exception as e:
-            logger.error(f"[Autonomy] Check failed — blocking as safety measure: {e}")
+            logger.exception(f"[Autonomy] Check failed: {e}")
             return f"⚠️ Autonomy check failed ({e}). Operation blocked for safety. Please retry or contact admin."
 
     try:
@@ -1355,8 +1357,7 @@ async def execute_tool(
             )
         return result
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"[Tool] Execution failed: {tool_name}")
         return f"Tool execution error ({tool_name}): {type(e).__name__}: {str(e)[:200]}"
 
 
@@ -1861,6 +1862,11 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> s
         async with async_session() as db:
             result = await db.execute(select(Tool).where(Tool.name == tool_name, Tool.type == "mcp"))
             tool = result.scalar_one_or_none()
+
+            if not tool:
+                logger.warning(f"[MCP] Unknown tool: {tool_name}")
+                return f"Unknown tool: {tool_name}"
+
             # Load per-agent config override
             agent_config = {}
             if tool and agent_id:
@@ -1873,10 +1879,8 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> s
                 at = at_r.scalar_one_or_none()
                 agent_config = (at.config or {}) if at else {}
 
-        if not tool:
-            return f"Unknown tool: {tool_name}"
-
         if not tool.mcp_server_url:
+            logger.error(f"[MCP] Tool {tool_name} has no server URL configured")
             return f"❌ MCP tool {tool_name} has no server URL configured"
 
         # Merge global config + agent override
@@ -1905,6 +1909,7 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> s
         return await client.call_tool(mcp_name, arguments)
 
     except Exception as e:
+        logger.exception(f"[MCP] Tool execution error: {tool_name}")
         return f"❌ MCP tool execution error: {str(e)[:200]}"
 
 
@@ -3616,6 +3621,11 @@ async def _execute_code(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict
     work_dir = (ws / "workspace").resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    # Security check
+    safety_check_result = _check_code_safety(language, code)
+    if safety_check_result:
+        return safety_check_result
+
     try:
         # Import here to avoid circular imports
         from app.config import get_sandbox_config
@@ -3624,22 +3634,15 @@ async def _execute_code(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict
 
         # Get sandbox config: prefer tool config from DB, fallback to env vars
         fallback_config = get_sandbox_config()
-        logger.info(f"[Sandbox] Fallback config from env: type={fallback_config.type}, api_url={fallback_config.api_url}, api_key={'***' if fallback_config.api_key else '(empty)'}")
-
         tool_config = await _get_tool_config(agent_id, "execute_code")
-        logger.info(f"[Sandbox] Tool config from DB: {tool_config}")
 
         if tool_config:
             sandbox_config = SandboxConfig.from_dict(tool_config, fallback_config)
-            logger.info(f"[Sandbox] Merged config: type={sandbox_config.type}, api_url={sandbox_config.api_url}, api_key={'***' if sandbox_config.api_key else '(empty)'}")
         else:
             sandbox_config = fallback_config
-            logger.info(f"[Sandbox] Using fallback config (no DB config)")
+            logger.info(f"[Sandbox] Using fallback config for agent {agent_id}")
 
         backend = get_sandbox_backend(sandbox_config)
-        logger.info(f"[Sandbox] Backend created: {backend.__class__.__name__}")
-
-        # Execute code using the sandbox backend
         result = await backend.execute(
             code=code,
             language=language,
@@ -3652,14 +3655,16 @@ async def _execute_code(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict
 
     except ValueError as e:
         # Sandbox disabled or misconfigured - fall back to legacy subprocess
-        # Fall through to legacy implementation below
+        logger.warning(f"[Sandbox] Config issue, falling back to legacy: {e}")
         return await _execute_code_legacy(ws, arguments)
 
     except Exception as e:
+        logger.exception(f"[Sandbox] Execution failed for agent {agent_id}")
         # Try fallback to legacy subprocess
         try:
             return await _execute_code_legacy(ws, arguments)
-        except Exception:
+        except Exception as fallback_error:
+            logger.exception(f"[Sandbox] Fallback also failed for agent {agent_id}")
             return f"❌ Execution error: {str(e)[:200]}"
 
 

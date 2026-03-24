@@ -282,17 +282,44 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
                                             (depVals as string[]).includes(configData[depKey] ?? '')
                                         );
                                     })
-                                    .map((field: any) => (
+                                    .map((field: any) => {
+                                        // Get user role from store directly in the map function
+                                        const userFromStore = useAuthStore.getState().user;
+                                        const currentUserRole = userFromStore?.role;
+                                        const isReadOnly = field.read_only_for_roles?.includes(currentUserRole);
+                                        return (
                                         <div key={field.key}>
                                             <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, marginBottom: '4px' }}>
                                                 {field.label}
+                                                {isReadOnly && <span style={{ fontWeight: 400, color: 'var(--text-tertiary)', marginLeft: '4px' }}>(Admin only)</span>}
                                                 {configTool.global_config?.[field.key] && (
                                                     <span style={{ fontWeight: 400, color: 'var(--text-tertiary)', marginLeft: '4px' }}>
                                                         (global: {String(configTool.global_config[field.key]).slice(0, 20)}{String(configTool.global_config[field.key]).length > 20 ? '…' : ''})
                                                     </span>
                                                 )}
                                             </label>
-                                            {field.type === 'password' ? (
+                                            {field.type === 'checkbox' ? (
+                                                <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: isReadOnly ? 'not-allowed' : 'pointer' }}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={configData[field.key] ?? field.default ?? false}
+                                                        disabled={isReadOnly}
+                                                        onChange={e => setConfigData(p => ({ ...p, [field.key]: e.target.checked }))}
+                                                        style={{ opacity: 0, width: 0, height: 0 }}
+                                                    />
+                                                    <span style={{
+                                                        position: 'absolute', inset: 0,
+                                                        background: (configData[field.key] ?? field.default) ? '#22c55e' : 'var(--bg-tertiary)',
+                                                        borderRadius: '11px', transition: 'background 0.2s', opacity: isReadOnly ? 0.6 : 1,
+                                                    }}>
+                                                        <span style={{
+                                                            position: 'absolute', left: (configData[field.key] ?? field.default) ? '20px' : '2px', top: '2px',
+                                                            width: '18px', height: '18px', background: '#fff',
+                                                            borderRadius: '50%', transition: 'left 0.2s',
+                                                        }} />
+                                                    </span>
+                                                </label>
+                                            ) : field.type === 'password' ? (
                                                 <>
                                                 <input type="password" className="form-input" value={configData[field.key] ?? ''} placeholder={field.placeholder || 'Leave blank to use global default'} onChange={e => setConfigData(p => ({ ...p, [field.key]: e.target.value }))} />
                                                 {/* Per-provider help text for auth_code */}
@@ -321,7 +348,7 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
                                                 <input type="text" className="form-input" value={configData[field.key] ?? ''} placeholder={field.placeholder || 'Leave blank to use global default'} onChange={e => setConfigData(p => ({ ...p, [field.key]: e.target.value }))} />
                                             )}
                                         </div>
-                                    ))}
+                                    );})}
                                 {/* Email tool: test connection button + help text */}
                                 {configTool.category === 'email' && (
                                     <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>

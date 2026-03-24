@@ -402,6 +402,14 @@ async def update_agent_tool_config(
     db: AsyncSession = Depends(get_db),
 ):
     """Save per-agent config override for a tool."""
+    # Check permission: only platform_admin and org_admin can modify allow_network
+    if "allow_network" in data.config:
+        if current_user.role not in ("platform_admin", "org_admin"):
+            raise HTTPException(
+                status_code=403,
+                detail="Only platform admin or organization admin can modify network access settings"
+            )
+
     # Encrypt sensitive fields
     encrypted_config = _encrypt_sensitive_fields(data.config)
 

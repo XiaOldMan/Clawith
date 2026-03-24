@@ -31,7 +31,6 @@ class AioSandboxBackend(BaseSandboxBackend):
     def __init__(self, config: SandboxConfig):
         self.config = config
         self.base_url = config.api_url.rstrip("/") if config.api_url else ""
-        logger.info(f"[AioSandboxBackend] Initialized with base_url={self.base_url}, api_key={'***' if config.api_key else '(empty)'}")
 
         if not self.base_url:
             raise ValueError(
@@ -70,7 +69,6 @@ class AioSandboxBackend(BaseSandboxBackend):
     ) -> ExecutionResult:
         """Execute code using aio-sandbox."""
         start_time = time.time()
-        logger.info(f"[AioSandboxBackend] Executing {language} code, base_url={self.base_url}")
 
         # Determine endpoint based on language
         # Use jupyter for python, shell for others
@@ -104,7 +102,6 @@ class AioSandboxBackend(BaseSandboxBackend):
         headers = {"Content-Type": "application/json"}
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
-        logger.info(f"[AioSandboxBackend] POST {endpoint}, headers have_auth={bool(self.config.api_key)}")
 
         try:
             async with httpx.AsyncClient() as client:
@@ -128,7 +125,6 @@ class AioSandboxBackend(BaseSandboxBackend):
                     )
 
                 result = response.json()
-                logger.info(f"[AioSandboxBackend] Response: success={result.get('success')}, data keys={list(result.get('data', {}).keys()) if result.get('data') else 'none'}")
 
                 # Parse response
                 # Shell: {"success": true, "data": {"output": "...", "exit_code": 0}}
@@ -188,6 +184,7 @@ class AioSandboxBackend(BaseSandboxBackend):
 
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
+            logger.exception(f"[AioSandbox] Execution error")
             return ExecutionResult(
                 success=False,
                 stdout="",

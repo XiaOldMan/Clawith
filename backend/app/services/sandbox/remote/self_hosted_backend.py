@@ -1,11 +1,14 @@
 """Self-hosted sandbox backend."""
 
+import logging
 import time
 
 import httpx
 
 from app.services.sandbox.base import BaseSandboxBackend, ExecutionResult, SandboxCapabilities
 from app.services.sandbox.config import SandboxConfig
+
+logger = logging.getLogger(__name__)
 
 
 class SelfHostedBackend(BaseSandboxBackend):
@@ -190,6 +193,7 @@ class SelfHostedBackend(BaseSandboxBackend):
 
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
+            logger.exception(f"[SelfHosted] Execution error")
             return ExecutionResult(
                 success=False,
                 stdout="",

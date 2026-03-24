@@ -1,10 +1,13 @@
 """Local docker-based sandbox backend."""
 
+import logging
 import time
 from pathlib import Path
 
 from app.services.sandbox.base import BaseSandboxBackend, ExecutionResult, SandboxCapabilities
 from app.services.sandbox.config import SandboxConfig
+
+logger = logging.getLogger(__name__)
 
 # Lazy import docker to make it optional
 _docker = None
@@ -178,6 +181,7 @@ class DockerBackend(BaseSandboxBackend):
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
             error_msg = str(e)
+            logger.exception(f"[Docker] Execution error")
 
             # Handle timeout specifically
             if "timeout" in error_msg.lower():
