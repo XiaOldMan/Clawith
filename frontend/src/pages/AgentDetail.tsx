@@ -11,6 +11,9 @@ import MarkdownRenderer from '../components/MarkdownRenderer';
 import PromptModal from '../components/PromptModal';
 import { activityApi, agentApi, channelApi, enterpriseApi, fileApi, scheduleApi, skillApi, taskApi, triggerApi, uploadFileWithProgress } from '../services/api';
 import { useAuthStore } from '../stores';
+import wsPoolManager from '../services/WebSocketPoolManager';
+import sessionStateManager from '../services/SessionStateManager';
+import sessionSwitchHandler from '../services/SessionSwitchHandler';
 
 const TABS = ['status', 'aware', 'mind', 'tools', 'skills', 'relationships', 'workspace', 'chat', 'activityLog', 'approvals', 'settings'] as const;
 
@@ -937,6 +940,58 @@ function AgentDetailInner() {
     const uploadAbortRef = useRef<(() => void) | null>(null);
     const [attachedFiles, setAttachedFiles] = useState<{ name: string; text: string; path?: string; imageUrl?: string }[]>([]);
     const wsRef = useRef<WebSocket | null>(null);
+    const [wsConnected, setWsConnected] = useState(false);
+
+    // The new services are managed globally via imported modules
+    // wsPoolManager handles connection pooling and reuse
+    // sessionStateManager tracks session states
+    // sessionSwitchHandler manages session switching protocols
+
+    // Start health monitoring when component mounts
+    useEffect(() => {
+        wsPoolManager.startHealthMonitoring();
+
+        return () => {
+            wsPoolManager.stopHealthMonitoring();
+        };
+    }, []);
+
+    // Initialize session state management
+    useEffect(() => {
+        if (activeSession?.id) {
+            sessionStateManager.initializeSession(activeSession.id);
+            sessionStateManager.activateSession(activeSession.id);
+        }
+    }, [activeSession?.id]);
+
+    // Function to get or create WebSocket connection for an agent using the pool manager
+    const getOrCreateWsConnection = (agentId: string, token: string, sessionParam: string) => {
+        // Use the WebSocket pool manager to get or create a connection
+        const connection = wsPoolManager.getOrCreateConnection(agentId, token, sessionParam);
+        return connection.ws;
+    };
+
+    // Function to switch session on existing connection using the handler
+    const switchSessionOnWs = async (ws: WebSocket, newSessionId: string) => {
+        if (sessionSwitchHandler.isSessionSwitchSupported(ws)) {
+            const result = await sessionSwitchHandler.handleSessionSwitch(ws, newSessionId);
+
+            if (result.success) {
+                // Update session state management
+                sessionStateManager.deactivateSession(wsRef.current ? (wsRef.current as any)._sessionId || '' : '');
+                sessionStateManager.activateSession(newSessionId);
+
+                // Update internal tracking
+                (ws as any)._sessionId = newSessionId;
+
+                // Update connection in session state manager
+                sessionStateManager.markReconnected(newSessionId);
+            } else {
+                console.error('Session switch failed:', result.error);
+                sessionStateManager.updateSessionError(newSessionId, result.error || 'Unknown error');
+            }
+        }
+    };
     const chatEndRef = useRef<HTMLDivElement>(null);
     const chatContainerRef = useRef<HTMLDivElement>(null);
     const chatInputRef = useRef<HTMLInputElement>(null);
@@ -1057,91 +1112,223 @@ function AgentDetailInner() {
         const isAgentSession = activeSession.source_channel === 'agent' || activeSession.participant_type === 'agent';
         if (isAgentSession) return;
         if (activeSession.user_id && currentUser && activeSession.user_id !== String(currentUser.id)) return;
+
         let cancelled = false;
         const sessionParam = activeSession?.id ? `&session_id=${activeSession.id}` : '';
+
         const connect = () => {
             if (cancelled) return;
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat/${id}?token=${token}${sessionParam}`);
-            ws.onopen = () => { if (cancelled) { ws.close(); return; } setWsConnected(true); wsRef.current = ws; };
-            ws.onclose = (e) => {
-                if (e.code === 4003 || e.code === 4002) {
-                    // 4003 = Agent expired, 4002 = Config error (no model, setup failed)
-                    if (e.code === 4003) setAgentExpired(true);
-                    setWsConnected(false);
-                    setIsWaiting(false);
-                    setIsStreaming(false);
-                    return;
-                }
-                if (!cancelled) { setWsConnected(false); setIsWaiting(false); setIsStreaming(false); setTimeout(connect, 2000); }
-            };
-            ws.onerror = () => { if (!cancelled) setWsConnected(false); };
-            ws.onmessage = (e) => {
-                const d = JSON.parse(e.data);
-                if (['thinking', 'chunk', 'tool_call', 'done', 'error', 'quota_exceeded'].includes(d.type)) {
-                    setIsWaiting(false);
-                    if (['thinking', 'chunk', 'tool_call'].includes(d.type)) setIsStreaming(true);
-                    if (['done', 'error', 'quota_exceeded'].includes(d.type)) setIsStreaming(false);
-                }
 
-                if (d.type === 'thinking') {
-                    setChatMessages(prev => {
-                        const last = prev[prev.length - 1];
-                        if (last && last.role === 'assistant' && (last as any)._streaming) {
-                            return [...prev.slice(0, -1), { ...last, thinking: (last.thinking || '') + d.content } as any];
-                        }
-                        return [...prev, { role: 'assistant', content: '', thinking: d.content, _streaming: true } as any];
-                    });
-                } else if (d.type === 'tool_call') {
-                    setChatMessages(prev => {
-                        const toolMsg: ChatMsg = { role: 'tool_call', content: '', toolName: d.name, toolArgs: d.args, toolStatus: d.status, toolResult: d.result };
-                        if (d.status === 'done') {
-                            const lastIdx = prev.length - 1;
-                            const last = prev[lastIdx];
-                            if (last && last.role === 'tool_call' && last.toolName === d.name && last.toolStatus === 'running') return [...prev.slice(0, lastIdx), toolMsg];
-                        }
-                        return [...prev, toolMsg];
-                    });
-                } else if (d.type === 'chunk') {
-                    setChatMessages(prev => {
-                        const last = prev[prev.length - 1];
-                        if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), { ...last, content: last.content + d.content } as any];
-                        return [...prev, { role: 'assistant', content: d.content, _streaming: true } as any];
-                    });
-                } else if (d.type === 'done') {
-                    setChatMessages(prev => {
-                        const last = prev[prev.length - 1];
-                        const thinking = (last && last.role === 'assistant' && (last as any)._streaming) ? last.thinking : undefined;
-                        if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), { role: 'assistant', content: d.content, thinking, timestamp: new Date().toISOString() }];
-                        return [...prev, { role: d.role, content: d.content, timestamp: new Date().toISOString() }];
-                    });
-                    // Silently refresh session list to update last_message_at (no loading spinner)
-                    fetchMySessions(true);
-                } else if (d.type === 'error' || d.type === 'quota_exceeded') {
-                    const msg = d.content || d.detail || d.message || 'Request denied';
-                    // Only add message if not a duplicate of the last one
-                    setChatMessages(prev => {
-                        const last = prev[prev.length - 1];
-                        if (last && last.role === 'assistant' && last.content === `⚠️ ${msg}`) return prev;
-                        return [...prev, { role: 'assistant', content: `⚠️ ${msg}` }];
-                    });
-                    // Permanent errors — stop reconnecting
-                    if (msg.includes('expired') || msg.includes('Setup failed') || msg.includes('no LLM model') || msg.includes('No model')) {
-                        cancelled = true;
-                        if (msg.includes('expired')) setAgentExpired(true);
-                    }
-                } else if (d.type === 'trigger_notification') {
-                    // Trigger fired — show the result as a new assistant message
-                    setChatMessages(prev => [...prev, { role: 'assistant', content: d.content }]);
-                    fetchMySessions(true);
+            // Use the WebSocket pool manager to get or create connection
+            const connection = wsPoolManager.getOrCreateConnection(id, token, sessionParam);
+            let ws = connection.ws;
+
+            // If connection already exists for this agent and is active, try to switch sessions
+            if (wsPoolManager.hasActiveConnection(id) && activeSession?.id) {
+                // Check if we already have a WebSocket connected to this specific session
+                const sessionWs = wsPoolManager.getConnectionForSession(id, activeSession.id);
+
+                if (sessionWs && sessionWs.readyState === WebSocket.OPEN) {
+                    // Use existing connection for this session
+                    ws = sessionWs;
                 } else {
-                    setChatMessages(prev => [...prev, { role: d.role, content: d.content }]);
+                    // Check if the current connection is different from what we need
+                    const currentWs = wsPoolManager.getConnectionForSession(id, activeSession.id);
+                    if (!currentWs) {
+                        // Try to reuse the existing connection and switch to the new session
+                        switchSessionOnWs(ws, activeSession.id).then();
+                    }
                 }
-            };
+            } else {
+                // Create new connection via pool manager
+                ws = getOrCreateWsConnection(id, token, sessionParam);
+            }
+
+            // Update the ref to the current WebSocket
+            wsRef.current = ws;
+
+            // Only set up event handlers if they're not already set for this WebSocket instance
+            const wsKey = `${id}-${ws.url}`;
+            if (!(ws as any).__handlersSet__) {
+                (ws as any).__handlersSet__ = true;
+
+                ws.onopen = () => {
+                    if (cancelled) {
+                        ws.close();
+                        return;
+                    }
+                    setWsConnected(true);
+
+                    // Update session state as connected
+                    if (activeSession?.id) {
+                        sessionStateManager.markReconnected(activeSession.id);
+                    }
+                };
+
+                ws.onclose = (e) => {
+                    if (e.code === 4003 || e.code === 4002) {
+                        // 4003 = Agent expired, 4002 = Config error (no model, setup failed)
+                        if (e.code === 4003) setAgentExpired(true);
+                        setWsConnected(false);
+                        setIsWaiting(false);
+                        setIsStreaming(false);
+
+                        // Mark session as disconnected
+                        if (activeSession?.id) {
+                            sessionStateManager.markDisconnected(activeSession.id, 'Agent expired or configuration error');
+                        }
+                        return;
+                    }
+                    if (!cancelled) {
+                        setWsConnected(false);
+                        setIsWaiting(false);
+                        setIsStreaming(false);
+
+                        // Mark session as disconnected
+                        if (activeSession?.id) {
+                            sessionStateManager.markDisconnected(activeSession.id, 'Connection closed');
+                        }
+
+                        setTimeout(connect, 2000);
+                    }
+                };
+
+                ws.onerror = () => {
+                    if (!cancelled) {
+                        setWsConnected(false);
+
+                        // Mark session as disconnected
+                        if (activeSession?.id) {
+                            sessionStateManager.markDisconnected(activeSession.id, 'Connection error');
+                        }
+                    }
+                };
+
+                ws.onmessage = (e) => {
+                    const d = JSON.parse(e.data);
+                    if (['session_switched'].includes(d.type)) {
+                        // Handle session switch response
+                        if (d.success) {
+                            setWsConnected(true);
+
+                            // Update session state management
+                            if (d.newSessionId) {
+                                sessionStateManager.deactivateSession(d.previousSessionId || '');
+                                sessionStateManager.activateSession(d.newSessionId);
+                                sessionStateManager.markReconnected(d.newSessionId);
+                            }
+                        } else {
+                            console.error('Session switch failed:', d.error);
+                            if (d.newSessionId) {
+                                sessionStateManager.updateSessionError(d.newSessionId, d.error || 'Unknown error');
+                            }
+                        }
+                        return;
+                    }
+
+                    // Update session with received message
+                    if (activeSession?.id) {
+                        sessionStateManager.addMessage(activeSession.id, d);
+                    }
+
+                    if (['thinking', 'chunk', 'tool_call', 'done', 'error', 'quota_exceeded'].includes(d.type)) {
+                        setIsWaiting(false);
+                        if (['thinking', 'chunk', 'tool_call'].includes(d.type)) setIsStreaming(true);
+                        if (['done', 'error', 'quota_exceeded'].includes(d.type)) setIsStreaming(false);
+                    }
+
+                    if (d.type === 'thinking') {
+                        setChatMessages(prev => {
+                            const last = prev[prev.length - 1];
+                            if (last && last.role === 'assistant' && (last as any)._streaming) {
+                                return [...prev.slice(0, -1), { ...last, thinking: (last.thinking || '') + d.content } as any];
+                            }
+                            return [...prev, { role: 'assistant', content: '', thinking: d.content, _streaming: true } as any];
+                        });
+                    } else if (d.type === 'tool_call') {
+                        setChatMessages(prev => {
+                            const toolMsg: ChatMsg = { role: 'tool_call', content: '', toolName: d.name, toolArgs: d.args, toolStatus: d.status, toolResult: d.result };
+                            if (d.status === 'done') {
+                                const lastIdx = prev.length - 1;
+                                const last = prev[lastIdx];
+                                if (last && last.role === 'tool_call' && last.toolName === d.name && last.toolStatus === 'running') return [...prev.slice(0, lastIdx), toolMsg];
+                            }
+                            return [...prev, toolMsg];
+                        });
+                    } else if (d.type === 'chunk') {
+                        setChatMessages(prev => {
+                            const last = prev[prev.length - 1];
+                            if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), { ...last, content: last.content + d.content } as any];
+                            return [...prev, { role: 'assistant', content: d.content, _streaming: true } as any];
+                        });
+                    } else if (d.type === 'done') {
+                        setChatMessages(prev => {
+                            const last = prev[prev.length - 1];
+                            const thinking = (last && last.role === 'assistant' && (last as any)._streaming) ? last.thinking : undefined;
+                            if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), { role: 'assistant', content: d.content, thinking, timestamp: new Date().toISOString() }];
+                            return [...prev, { role: d.role, content: d.content, timestamp: new Date().toISOString() }];
+                        });
+                        // Silently refresh session list to update last_message_at (no loading spinner)
+                        fetchMySessions(true);
+                    } else if (d.type === 'error' || d.type === 'quota_exceeded') {
+                        const msg = d.content || d.detail || d.message || 'Request denied';
+                        // Only add message if not a duplicate of the last one
+                        setChatMessages(prev => {
+                            const last = prev[prev.length - 1];
+                            if (last && last.role === 'assistant' && last.content === `⚠️ ${msg}`) return prev;
+                            return [...prev, { role: 'assistant', content: `⚠️ ${msg}` }];
+                        });
+                        // Permanent errors — stop reconnecting
+                        if (msg.includes('expired') || msg.includes('Setup failed') || msg.includes('no LLM model') || msg.includes('No model')) {
+                            cancelled = true;
+                            if (msg.includes('expired')) setAgentExpired(true);
+                        }
+                    } else if (d.type === 'trigger_notification') {
+                        // Trigger fired — show the result as a new assistant message
+                        setChatMessages(prev => [...prev, { role: 'assistant', content: d.content }]);
+                        fetchMySessions(true);
+                    } else {
+                        setChatMessages(prev => [...prev, { role: d.role, content: d.content }]);
+                    }
+                };
+            }
+
+            // Update connection status if WebSocket is open
+            if (ws.readyState === WebSocket.OPEN) {
+                setWsConnected(true);
+            } else if (ws.readyState === WebSocket.CONNECTING) {
+                setWsConnected(false);
+            }
         };
+
         connect();
-        return () => { cancelled = true; wsRef.current?.close(); wsRef.current = null; setWsConnected(false); };
-    }, [id, token, activeTab, activeSession?.id]);
+
+        // Clean up function
+        return () => {
+            cancelled = true;
+            // Don't close the connection if we're switching sessions - it might be reused by another session
+            // The connection will be cleaned up when all sessions for this agent are closed
+            setWsConnected(false);
+        };
+    }, [id, token, activeTab, activeSession?.id]); // Dependencies include activeSession.id to handle session changes
+
+    // Separate effect to handle WebSocket connection cleanup when agent changes or component unmounts
+    useEffect(() => {
+        return () => {
+            // Close all WebSocket connections for this agent through the pool manager
+            wsPoolManager.closeAgentConnections(id);
+
+            // Clean up session states for this agent
+            if (activeSession?.id) {
+                sessionStateManager.deactivateSession(activeSession.id);
+            }
+        };
+    }, [id]); // Only run when agent id changes or component unmounts
+
+    // Helper function to check if the WebSocket URL already contains the session param
+    function wsUrlHasSessionParam(url: string, sessionId: string) {
+        return url.includes(`session_id=${sessionId}`);
+    }
 
     // Smart scroll: only auto-scroll if user is at the bottom
     const isNearBottom = useRef(true);
@@ -1206,9 +1393,10 @@ function AgentDetailInner() {
     }, [activeSession?.id, activeTab]);
 
     const sendChatMsg = () => {
-        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        const ws = wsRef.current;
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
         if (!chatInput.trim() && attachedFiles.length === 0) return;
-        
+
         let userMsg = chatInput.trim();
         let contentForLLM = userMsg;
         let displayFiles = '';
@@ -1216,7 +1404,7 @@ function AgentDetailInner() {
         if (attachedFiles.length > 0) {
             let filesPrompt = '';
             let filesDisplay = '';
-            
+
             attachedFiles.forEach(file => {
                 filesDisplay += `[📎 ${file.name}] `;
                 if (file.imageUrl && supportsVision) {
@@ -1236,27 +1424,27 @@ function AgentDetailInner() {
             } else {
                 contentForLLM = userMsg ? `${filesPrompt}\nQuestion: ${userMsg}` : `Please analyze these files:\n\n${filesPrompt}`;
             }
-            
+
             displayFiles = filesDisplay.trim();
             userMsg = userMsg ? `${displayFiles}\n${userMsg}` : displayFiles;
         }
 
         setIsWaiting(true);
         setIsStreaming(false);
-        setChatMessages(prev => [...prev, { 
-            role: 'user', 
-            content: userMsg, 
-            fileName: attachedFiles.map(f => f.name).join(', '), 
-            imageUrl: attachedFiles.length === 1 ? attachedFiles[0].imageUrl : undefined, 
-            timestamp: new Date().toISOString() 
+        setChatMessages(prev => [...prev, {
+            role: 'user',
+            content: userMsg,
+            fileName: attachedFiles.map(f => f.name).join(', '),
+            imageUrl: attachedFiles.length === 1 ? attachedFiles[0].imageUrl : undefined,
+            timestamp: new Date().toISOString()
         }]);
-        wsRef.current.send(JSON.stringify({ 
-            content: contentForLLM, 
-            display_content: userMsg, 
-            file_name: attachedFiles.map(f => f.name).join(', ') 
+        ws.send(JSON.stringify({
+            content: contentForLLM,
+            display_content: userMsg,
+            file_name: attachedFiles.map(f => f.name).join(', ')
         }));
-        
-        setChatInput(''); 
+
+        setChatInput('');
         setAttachedFiles([]);
     };
 
@@ -3305,7 +3493,14 @@ function AgentDetailInner() {
                                                 placeholder={!wsConnected && (!activeSession?.user_id || !currentUser || activeSession.user_id === String(currentUser?.id)) ? 'Connecting...' : attachedFiles.length > 0 ? t('agent.chat.askAboutFile', { name: attachedFiles.length === 1 ? attachedFiles[0].name : `${attachedFiles.length} files` }) : t('chat.placeholder')}
                                                 disabled={!wsConnected || isWaiting || isStreaming} style={{ flex: 1 }} autoFocus />
                                             {(isStreaming || isWaiting) ? (
-                                                <button className="btn btn-stop-generation" onClick={() => { if (wsRef.current?.readyState === WebSocket.OPEN) { wsRef.current.send(JSON.stringify({ type: 'abort' })); setIsStreaming(false); setIsWaiting(false); } }} style={{ padding: '6px 16px' }} title={t('chat.stop', 'Stop')}>
+                                                <button className="btn btn-stop-generation" onClick={() => {
+                                                    const ws = wsRef.current;
+                                                    if (ws?.readyState === WebSocket.OPEN) {
+                                                        ws.send(JSON.stringify({ type: 'abort' }));
+                                                        setIsStreaming(false);
+                                                        setIsWaiting(false);
+                                                    }
+                                                }} style={{ padding: '6px 16px' }} title={t('chat.stop', 'Stop')}>
                                                     <span className="stop-icon" />
                                                 </button>
                                             ) : (

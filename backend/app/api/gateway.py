@@ -265,7 +265,7 @@ async def report_result(
                 "type": "done",
                 "role": "assistant",
                 "content": body.result,
-            })
+            }, msg.conversation_id)
         except Exception:
             pass  # User may have disconnected
 

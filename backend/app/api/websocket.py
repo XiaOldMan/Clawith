@@ -16,42 +16,41 @@ from app.models.agent import Agent
 from app.models.audit import ChatMessage
 from app.models.llm import LLMModel
 from app.models.user import User
+from app.core.logging_config import set_trace_id, get_trace_id
+from app.services.channel_session import find_or_create_channel_session
+from app.services.websocket_pool_manager import WebSocketPoolManager
 
 router = APIRouter(tags=["websocket"])
 
+# Use the new WebSocket pool manager for enhanced connection management
+manager = WebSocketPoolManager()
 
-class ConnectionManager:
-    """Manage WebSocket connections per agent."""
+# Initialize the connection pool health monitoring
+import asyncio
 
-    def __init__(self):
-        # agent_id_str -> list of (WebSocket, session_id_str | None)
-        self.active_connections: dict[str, list[tuple]] = {}
-
-    async def connect(self, agent_id: str, websocket: WebSocket, session_id: str = None):
-        await websocket.accept()
-        if agent_id not in self.active_connections:
-            self.active_connections[agent_id] = []
-        self.active_connections[agent_id].append((websocket, session_id))
-
-    def disconnect(self, agent_id: str, websocket: WebSocket):
-        if agent_id in self.active_connections:
-            self.active_connections[agent_id] = [
-                (ws, sid) for ws, sid in self.active_connections[agent_id] if ws != websocket
-            ]
-
-    async def send_message(self, agent_id: str, message: dict):
-        if agent_id in self.active_connections:
-            for ws, _sid in self.active_connections[agent_id]:
-                await ws.send_json(message)
-
-    def get_active_session_ids(self, agent_id: str) -> list[str]:
-        """Return distinct session IDs for all active WS connections of an agent."""
-        if agent_id not in self.active_connections:
-            return []
-        return list(set(sid for _ws, sid in self.active_connections[agent_id] if sid))
+# Initialize the connection pool health monitoring
+asyncio.create_task(manager.start_health_monitoring())
 
 
-manager = ConnectionManager()
+# Add a shutdown handler to properly close connections
+import atexit
+def shutdown_handler():
+    import asyncio
+    import signal
+
+    async def cleanup():
+        await manager.stop_health_monitoring()
+
+    # Run the async cleanup in a new event loop since the main one might be closed
+    asyncio.run(cleanup())
+
+atexit.register(shutdown_handler)
+
+
+async def shutdown_event():
+    await manager.stop_health_monitoring()
+
+# This can be hooked into FastAPI's lifespan events if needed
 
 
 from fastapi import Depends
@@ -474,15 +473,21 @@ async def websocket_chat(
             conv_id = session_id
             if conv_id:
                 # Validate the session belongs to this agent
-                _sr = await db.execute(
-                    _sel(ChatSession).where(
-                        ChatSession.id == uuid.UUID(conv_id),
-                        ChatSession.agent_id == agent_id,
+                try:
+                    _sr = await db.execute(
+                        _sel(ChatSession).where(
+                            ChatSession.id == uuid.UUID(conv_id),
+                            ChatSession.agent_id == agent_id,
+                        )
                     )
-                )
-                _existing = _sr.scalar_one_or_none()
-                if not _existing:
-                    conv_id = None  # fall through to create
+                    _existing = _sr.scalar_one_or_none()
+                    if not _existing:
+                        conv_id = None  # fall through to create
+                except ValueError:
+                    # Invalid UUID format
+                    logger.warning(f"[WS] Invalid session_id format: {conv_id}")
+                    conv_id = None
+
             if not conv_id:
                 # Find most recent session for this user+agent
                 _sr = await db.execute(
@@ -528,11 +533,14 @@ async def websocket_chat(
         await websocket.close(code=4002)  # Config error — client should NOT retry
         return
 
+    # Generate a trace ID for this WebSocket connection
+    import uuid as uuid_lib
+    trace_id = f"ws-{str(uuid_lib.uuid4())[:8]}"
+    set_trace_id(trace_id)
+
     agent_id_str = str(agent_id)
-    if agent_id_str not in manager.active_connections:
-        manager.active_connections[agent_id_str] = []
-    manager.active_connections[agent_id_str].append((websocket, conv_id))
-    logger.info(f"[WS] Ready! Agent={agent_name}")
+    await manager.connect(agent_id_str, websocket, conv_id)
+    logger.info(f"[WS] Ready! Agent={agent_name} [trace_id: {trace_id}]")
 
     # Build conversation context from history
     # IMPORTANT: Include tool_call messages so the LLM maintains tool-calling behavior.
@@ -583,12 +591,101 @@ async def websocket_chat(
         while True:
             logger.info(f"[WS] Waiting for message from {agent_name}...")
             data = await websocket.receive_json()
+
+            # Handle session switching messages first
+            message_type = data.get("type")
+            if message_type == "switch_session":
+                new_session_id = data.get("session_id")
+                if new_session_id:
+                    # Update the session for this connection
+                    success = manager.switch_session(agent_id_str, websocket, new_session_id)
+                    if success:
+                        conv_id = new_session_id  # Update current session ID
+                        # Send confirmation to client
+                        await websocket.send_json({
+                            "type": "session_switched",
+                            "session_id": new_session_id,
+                            "success": True
+                        })
+                        # Reload conversation history for the new session
+                        try:
+                            async with async_session() as db:
+                                history_result = await db.execute(
+                                    select(ChatMessage)
+                                    .where(ChatMessage.agent_id == agent_id, ChatMessage.conversation_id == new_session_id)
+                                    .order_by(ChatMessage.created_at.desc())
+                                    .limit(20)
+                                )
+                                history_messages = list(reversed(history_result.scalars().all()))
+                                logger.info(f"[WS] Loaded {len(history_messages)} history messages for session {new_session_id}")
+
+                                # Build conversation context from new session's history
+                                conversation = []
+                                for msg in history_messages:
+                                    if msg.role == "tool_call":
+                                        # Convert stored tool_call JSON into OpenAI-format assistant+tool pair
+                                        try:
+                                            import json as _j_hist
+                                            tc_data = _j_hist.loads(msg.content)
+                                            tc_name = tc_data.get("name", "unknown")
+                                            tc_args = tc_data.get("args", {})
+                                            tc_result = tc_data.get("result", "")
+                                            tc_id = f"call_{msg.id}"  # synthetic tool_call_id
+                                            # Assistant message with tool_calls array
+                                            asst_msg = {
+                                                "role": "assistant",
+                                                "content": None,
+                                                "tool_calls": [{
+                                                    "id": tc_id,
+                                                    "type": "function",
+                                                    "function": {"name": tc_name, "arguments": _j_hist.dumps(tc_args, ensure_ascii=False)},
+                                                }],
+                                            }
+                                            if tc_data.get("reasoning_content"):
+                                                asst_msg["reasoning_content"] = tc_data["reasoning_content"]
+                                            conversation.append(asst_msg)
+                                            # Tool result message
+                                            conversation.append({
+                                                "role": "tool",
+                                                "tool_call_id": tc_id,
+                                                "content": str(tc_result)[:500],
+                                            })
+                                        except Exception:
+                                            continue  # Skip malformed tool_call records
+                                    else:
+                                        entry = {"role": msg.role, "content": msg.content}
+                                        if hasattr(msg, 'thinking') and msg.thinking:
+                                            entry["thinking"] = msg.thinking
+                                        conversation.append(entry)
+                        except Exception as e:
+                            logger.warning(f"[WS] History reload failed: {e}")
+
+                        continue  # Skip processing as a regular message
+                    else:
+                        await websocket.send_json({
+                            "type": "session_switched",
+                            "session_id": new_session_id,
+                            "success": False,
+                            "error": "Could not switch session"
+                        })
+                        continue
+                else:
+                    await websocket.send_json({
+                        "type": "session_switched",
+                        "success": False,
+                        "error": "Missing session_id"
+                    })
+                    continue
+
+            # Process regular messages
             content = data.get("content", "")
             display_content = data.get("display_content", "")  # User-facing display text
             file_name = data.get("file_name", "")  # Original file name for attachment display
             logger.info(f"[WS] Received: {content[:50]}")
 
-            if not content:
+            if not content and message_type != "abort":
+                # Send error message back to client if no content
+                await websocket.send_json({"type": "error", "content": "Message content is empty"})
                 continue
 
             # ── Quota checks ──
@@ -883,12 +980,12 @@ async def websocket_chat(
 
     except WebSocketDisconnect:
         logger.info(f"[WS] Client disconnected: {agent_name}")
-        manager.disconnect(agent_id_str, websocket)
+        await manager.disconnect(agent_id_str, websocket)
     except Exception as e:
         logger.error(f"[WS] Error in message loop: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
-        manager.disconnect(agent_id_str, websocket)
+        await manager.disconnect(agent_id_str, websocket)
         try:
             await websocket.close(code=1011)
         except Exception:

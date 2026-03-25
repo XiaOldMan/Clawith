@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "Clawith"
     APP_VERSION: str = _read_version()
     DEBUG: bool = False
-    SECRET_KEY: str = "change-me-in-production"
+    SECRET_KEY: str = "please_set_this_in_production_environment"
     API_PREFIX: str = "/api"
 
     # Database
@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
 
     # JWT
-    JWT_SECRET_KEY: str = "change-me-jwt-secret"
+    JWT_SECRET_KEY: str = "please_set_this_in_production_environment"
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
 
