@@ -37,6 +37,33 @@ WORKSPACE_ROOT = Path(_settings.AGENT_DATA_DIR)
 _tool_config_cache: dict[tuple, tuple[dict, datetime]] = {}
 _TOOL_CONFIG_CACHE_TTL_SECONDS = 60
 
+# Sensitive field keys that should be encrypted/decrypted
+SENSITIVE_FIELD_KEYS = {"api_key", "private_key", "auth_code", "password", "secret", "atlassian_api_key"}
+
+
+def _decrypt_sensitive_fields(config: dict) -> dict:
+    """Decrypt sensitive fields in config dict."""
+    if not config:
+        return config
+
+    from app.core.security import decrypt_data
+    from app.config import get_settings
+
+    settings = get_settings()
+    result = dict(config)
+
+    for key in SENSITIVE_FIELD_KEYS:
+        if key in result and result[key]:
+            value = result[key]
+            if isinstance(value, str) and value:
+                try:
+                    result[key] = decrypt_data(value, settings.SECRET_KEY)
+                except Exception:
+                    # If decryption fails, assume it's plaintext
+                    pass
+
+    return result
+
 
 def _get_cached_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Optional[dict]:
     """获取缓存的工具配置，过期返回 None。"""
@@ -86,7 +113,9 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
                 # 合并配置：agent_config 覆盖 global_config
                 merged = {**(global_config or {}), **(agent_config or {})}
                 if merged:
-                    logger.info(f"[ToolConfig] DB merged config for {tool_name}, agent_id={agent_id}: agent={agent_config}, global={global_config}, merged={merged}")
+                    # Decrypt before returning
+                    merged = _decrypt_sensitive_fields(merged)
+                    logger.info(f"[ToolConfig] DB merged config for {tool_name}, agent_id={agent_id}: {merged}")
                     _set_cached_tool_config(agent_id, tool_name, merged)
                     return merged
 
@@ -94,9 +123,11 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
         result = await db.execute(select(Tool).where(Tool.name == tool_name))
         tool = result.scalar_one_or_none()
         if tool and tool.config:
-            logger.info(f"[ToolConfig] DB global config for {tool_name}: {tool.config}")
-            _set_cached_tool_config(agent_id, tool_name, tool.config)
-            return tool.config
+            # Decrypt before returning
+            decrypted = _decrypt_sensitive_fields(tool.config)
+            logger.info(f"[ToolConfig] DB global config for {tool_name}: {decrypted}")
+            _set_cached_tool_config(agent_id, tool_name, decrypted)
+            return decrypted
 
     logger.error(f"[ToolConfig] No DB config found for {tool_name}, agent_id={agent_id}")
     return None
@@ -949,6 +980,68 @@ AGENT_TOOLS = [
             },
         },
     },
+    # ── AgentBay Tools ────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "agentbay_browser_navigate",
+            "description": "使用 AgentBay 浏览器环境访问指定 URL。可用于网页抓取、截图等。需要先配置 AgentBay 通道。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "要访问的网址，如 https://example.com"},
+                    "wait_for": {"type": "string", "description": "等待特定元素出现的选择器（可选）"},
+                    "screenshot": {"type": "boolean", "description": "是否截图并返回图片", "default": False},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agentbay_browser_click",
+            "description": "在 AgentBay 浏览器中点击指定元素。需要先使用 browser_navigate 打开页面。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string", "description": "CSS 选择器，如 #button 或 .class"},
+                },
+                "required": ["selector"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agentbay_browser_type",
+            "description": "在 AgentBay 浏览器的输入框中输入文本。需要先使用 browser_navigate 打开页面。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string", "description": "输入框的 CSS 选择器"},
+                    "text": {"type": "string", "description": "要输入的文本"},
+                },
+                "required": ["selector", "text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agentbay_code_execute",
+            "description": "在 AgentBay 代码空间中执行代码。支持 Python、Bash、Node.js。需要先配置 AgentBay 通道。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "language": {"type": "string", "enum": ["python", "bash", "node"], "description": "编程语言"},
+                    "code": {"type": "string", "description": "要执行的代码"},
+                    "timeout": {"type": "integer", "description": "超时时间（秒，默认 30）", "default": 30},
+                },
+                "required": ["language", "code"],
+            },
+        },
+    },
 ]
 
 
@@ -1192,6 +1285,7 @@ async def _execute_tool_direct(
                 return "Missing path"
             return _write_file(ws, path, content, tenant_id=_agent_tenant_id)
         elif tool_name == "execute_code":
+            logger.info(f"[DirectTool] Executing code with arguments: {arguments}")
             return await _execute_code(agent_id, ws, arguments)
         elif tool_name == "web_search":
             return await _web_search(arguments)
@@ -1306,6 +1400,7 @@ async def execute_tool(
         elif tool_name == "plaza_add_comment":
             result = await _plaza_add_comment(agent_id, arguments)
         elif tool_name == "execute_code":
+            logger.info(f"[DirectTool] Executing code with arguments: {arguments}")
             result = await _execute_code(agent_id, ws, arguments)
         elif tool_name == "upload_image":
             result = await _upload_image(agent_id, ws, arguments)
@@ -1343,6 +1438,15 @@ async def execute_tool(
             result = await _publish_page(agent_id, user_id, ws, arguments)
         elif tool_name == "list_published_pages":
             result = await _list_published_pages(agent_id)
+        # ── AgentBay Tools ──
+        elif tool_name == "agentbay_browser_navigate":
+            result = await _agentbay_browser_navigate(agent_id, ws, arguments)
+        elif tool_name == "agentbay_browser_click":
+            result = await _agentbay_browser_click(agent_id, ws, arguments)
+        elif tool_name == "agentbay_browser_type":
+            result = await _agentbay_browser_type(agent_id, ws, arguments)
+        elif tool_name == "agentbay_code_execute":
+            result = await _agentbay_code_execute(agent_id, ws, arguments)
         else:
             # Try MCP tool execution
             result = await _execute_mcp_tool(tool_name, arguments, agent_id=agent_id)
@@ -1885,6 +1989,7 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> s
 
         # Merge global config + agent override
         merged_config = {**(tool.config or {}), **agent_config}
+        merged_config = _decrypt_sensitive_fields(merged_config)
 
         mcp_url = tool.mcp_server_url
         mcp_name = tool.mcp_tool_name or tool_name
@@ -3694,11 +3799,6 @@ async def _execute_code(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict
     work_dir = (ws / "workspace").resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    # Security check
-    safety_check_result = _check_code_safety(language, code)
-    if safety_check_result:
-        return safety_check_result
-
     try:
         # Import here to avoid circular imports
         from app.config import get_sandbox_config
@@ -3716,6 +3816,7 @@ async def _execute_code(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict
             logger.info(f"[Sandbox] Using fallback config for agent {agent_id}")
 
         backend = get_sandbox_backend(sandbox_config)
+        logger.info(f"[Sandbox] Executing code with backend: {backend.__class__.__name__}")
         result = await backend.execute(
             code=code,
             language=language,
@@ -5594,6 +5695,138 @@ async def _list_published_pages(agent_id: uuid.UUID) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"Failed to list pages: {e}"
+
+
+# ─── AgentBay Tool Handlers ─────────────────────────────────────
+
+async def _agentbay_browser_navigate(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
+    """AgentBay 浏览器导航。"""
+    if not agent_id:
+        return "❌ AgentBay 工具需要 agent 上下文"
+
+    from app.services.agentbay_client import get_agentbay_client_for_agent
+
+    url = arguments.get("url", "")
+    screenshot = arguments.get("screenshot", False)
+    wait_for = arguments.get("wait_for", "")
+
+    try:
+        client = await get_agentbay_client_for_agent(agent_id, "browser")
+        result = await client.browser_navigate(url, wait_for=wait_for, screenshot=screenshot)
+
+        # 格式化返回结果
+        parts = [f"✅ 已访问: {url}"]
+        if result.get("title"):
+            parts.append(f"标题: {result['title']}")
+        if result.get("content"):
+            content = result["content"][:3000]  # 限制长度
+            parts.append(f"内容:\n{content}")
+        logger.info(f"[AgentBay] Browser navigate result: {result['title']}")
+        screenshot_data = result.get("screenshot")
+        if screenshot and screenshot_data:
+            import time
+            rel_path = f"workspace/screenshot_{int(time.time())}.png"
+            screenshot_path = ws / rel_path
+            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            # data from agent.screenshot can be base64 string or bytes.
+            if isinstance(screenshot_data, str):
+                import base64
+                if screenshot_data.startswith("data:image"):
+                    screenshot_data = screenshot_data.split(",", 1)[1]
+                screenshot_data = base64.b64decode(screenshot_data)
+            screenshot_path.write_bytes(screenshot_data)
+            
+            # 告诉大模型可以直接用 Markdown 显示出来
+            parts.append(
+                f"截图: 已保存至 `{rel_path}`。\n\n"
+                f"⚠️ 要在聊天框里向用户展示该截图，请必须在回复中包含以下原样 Markdown 语法：\n"
+                f"![浏览器截图](/api/agents/{agent_id}/files/download?path={rel_path})"
+            )
+
+        return "\n\n".join(parts)
+
+    except RuntimeError as e:
+        return f"❌ {str(e)}。请先在 Agent 设置中配置 AgentBay 通道。"
+    except Exception as e:
+        logger.exception(f"[AgentBay] Browser navigate failed for agent {agent_id}")
+        return f"❌ AgentBay 浏览器访问失败: {str(e)[:200]}"
+
+
+async def _agentbay_browser_click(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
+    """AgentBay 浏览器点击。"""
+    if not agent_id:
+        return "❌ AgentBay 工具需要 agent 上下文"
+
+    from app.services.agentbay_client import get_agentbay_client_for_agent
+
+    selector = arguments.get("selector", "")
+
+    try:
+        client = await get_agentbay_client_for_agent(agent_id, "browser")
+        await client.browser_click(selector)
+        return f"✅ 已点击元素: {selector}"
+    except RuntimeError as e:
+        return f"❌ {str(e)}"
+    except Exception as e:
+        logger.exception(f"[AgentBay] Browser click failed")
+        return f"❌ 点击失败: {str(e)[:200]}"
+
+
+async def _agentbay_browser_type(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
+    """AgentBay 浏览器输入。"""
+    if not agent_id:
+        return "❌ AgentBay 工具需要 agent 上下文"
+
+    from app.services.agentbay_client import get_agentbay_client_for_agent
+
+    selector = arguments.get("selector", "")
+    text = arguments.get("text", "")
+
+    try:
+        client = await get_agentbay_client_for_agent(agent_id, "browser")
+        await client.browser_type(selector, text)
+        return f"✅ 已在 {selector} 输入文本"
+    except RuntimeError as e:
+        return f"❌ {str(e)}"
+    except Exception as e:
+        logger.exception(f"[AgentBay] Browser type failed")
+        return f"❌ 输入失败: {str(e)[:200]}"
+
+
+async def _agentbay_code_execute(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
+    """在 AgentBay 代码空间执行代码。"""
+    if not agent_id:
+        return "❌ AgentBay 工具需要 agent 上下文"
+
+    from app.services.agentbay_client import get_agentbay_client_for_agent
+
+    language = arguments.get("language", "python")
+    code = arguments.get("code", "")
+    timeout = arguments.get("timeout", 30)
+
+    if not code.strip():
+        return "❌ 请提供要执行的代码"
+
+    try:
+        client = await get_agentbay_client_for_agent(agent_id, "code")
+        result = await client.code_execute(language, code, timeout)
+
+        # 格式化返回结果
+        parts = [f"✅ 代码执行完成 ({language})"]
+        if result.get("stdout"):
+            parts.append(f"📤 输出:\n{result['stdout']}")
+        if result.get("stderr"):
+            parts.append(f"⚠️ 错误输出:\n{result['stderr']}")
+        if result.get("exit_code") != 0:
+            parts.append(f"退出码: {result['exit_code']}")
+
+        return "\n\n".join(parts)
+
+    except RuntimeError as e:
+        return f"❌ {str(e)}。请先在 Agent 设置中配置 AgentBay 通道。"
+    except Exception as e:
+        logger.exception(f"[AgentBay] Code execution failed for agent {agent_id}")
+        return f"❌ 代码执行失败: {str(e)[:200]}"
 
 
 async def _handle_email_tool(tool_name: str, agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:

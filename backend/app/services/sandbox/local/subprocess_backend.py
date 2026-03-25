@@ -173,16 +173,7 @@ class SubprocessBackend(BaseSandboxBackend):
         elif language == "node":
             ext = ".js"
             cmd_prefix = ["node"]
-        else:
-            return ExecutionResult(
-                success=False,
-                stdout="",
-                stderr="",
-                exit_code=1,
-                duration_ms=int((time.time() - start_time) * 1000),
-                error=f"Unsupported language: {language}"
-            )
-
+        
         # Write code to temp file
         script_path = work_path / f"_exec_tmp{ext}"
 
