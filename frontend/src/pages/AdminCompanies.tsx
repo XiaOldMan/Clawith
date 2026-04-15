@@ -196,7 +196,7 @@ function PlatformTab() {
         try {
             await adminApi.updatePlatformSettings({ [key]: value });
             setSettings((s: any) => ({ ...s, [key]: value }));
-            showToast('Setting updated');
+            showToast(t('admin.settingUpdated', 'Setting updated'));
         } catch (e: any) {
             showToast(e.message || 'Failed', 'error');
         }
@@ -773,7 +773,7 @@ function CompaniesTab() {
 
     const columns: { key: SortKey; label: string; flex: string }[] = [
         { key: 'name', label: t('admin.company', 'Company'), flex: '2fr' },
-        { key: 'sso_enabled', label: 'SSO', flex: '100px' },
+        { key: 'sso_enabled', label: t('admin.sso', 'SSO'), flex: '100px' },
         { key: 'org_admin_email', label: t('admin.orgAdmin', 'Admin Email'), flex: '1.5fr' },
         { key: 'user_count', label: t('admin.users', 'Users'), flex: '70px' },
         { key: 'agent_count', label: t('admin.agents', 'Agents'), flex: '70px' },

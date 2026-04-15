@@ -234,8 +234,8 @@ function SsoChannelSection({ idpType, existingProvider, tenant, t }: {
                             style={{ fontSize: '11px', width: 'auto', minWidth: '70px', height: '33px' }}
                             disabled={!domain}
                             textToCopy={domain ? (domain.startsWith('http') ? domain : `https://${domain}`) : ''}
-                            label={t('common.copy', 'Copy')}
-                            copiedLabel="Copied"
+                            label={t('common.copy')}
+                            copiedLabel={t('common.copied')}
                         />
                     </div>
                     <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
@@ -267,8 +267,8 @@ function SsoChannelSection({ idpType, existingProvider, tenant, t }: {
                             style={{ fontSize: '11px', width: 'auto', minWidth: '70px', height: '33px' }}
                             disabled={!callbackUrl}
                             textToCopy={callbackUrl}
-                            label={t('common.copy', 'Copy')}
-                            copiedLabel="Copied"
+                            label={t('common.copy')}
+                            copiedLabel={t('common.copied')}
                         />
                     </div>
                     <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
@@ -536,10 +536,10 @@ function OrgTab({ tenant }: { tenant: any }) {
     };
 
     const IDP_TYPES = [
-        { type: 'feishu', name: 'Feishu', desc: 'Feishu / Lark Integration', icon: <img src="/feishu.png" width="20" height="20" alt="Feishu" /> },
-        { type: 'wecom', name: 'WeCom', desc: 'WeChat Work Integration', icon: <img src="/wecom.png" width="20" height="20" style={{ borderRadius: '4px' }} alt="WeCom" /> },
-        { type: 'dingtalk', name: 'DingTalk', desc: 'DingTalk App Integration', icon: <img src="/dingtalk.png" width="20" height="20" style={{ borderRadius: '4px' }} alt="DingTalk" /> },
-        { type: 'oauth2', name: 'OAuth2', desc: 'Generic OIDC Provider', icon: <div style={{ width: 20, height: 20, background: 'var(--accent-primary)', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 10, fontWeight: 700 }}>O</div> }
+        { type: 'feishu', name: t('enterprise.identity.providers.feishu.name', 'Feishu'), desc: t('enterprise.identity.providers.feishu.desc', 'Feishu / Lark Integration'), icon: <img src="/feishu.png" width="20" height="20" alt="Feishu" /> },
+        { type: 'wecom', name: t('enterprise.identity.providers.wecom.name', 'WeCom'), desc: t('enterprise.identity.providers.wecom.desc', 'WeChat Work Integration'), icon: <img src="/wecom.png" width="20" height="20" style={{ borderRadius: '4px' }} alt="WeCom" /> },
+        { type: 'dingtalk', name: t('enterprise.identity.providers.dingtalk.name', 'DingTalk'), desc: t('enterprise.identity.providers.dingtalk.desc', 'DingTalk App Integration'), icon: <img src="/dingtalk.png" width="20" height="20" style={{ borderRadius: '4px' }} alt="DingTalk" /> },
+        { type: 'oauth2', name: t('enterprise.identity.providers.oauth2.name', 'OAuth2'), desc: t('enterprise.identity.providers.oauth2.desc', 'Generic OIDC Provider'), icon: <div style={{ width: 20, height: 20, background: 'var(--accent-primary)', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 10, fontWeight: 700 }}>O</div> }
     ];
 
     const handleExpand = (type: string, existingProvider?: any) => {
@@ -597,8 +597,8 @@ function OrgTab({ tenant }: { tenant: any }) {
                                             className="btn btn-ghost"
                                             style={{ position: 'absolute', top: '8px', right: '8px', fontSize: '10px', color: '#abb2bf', padding: '4px 8px', background: 'rgba(255,255,255,0.1)', cursor: 'pointer', border: 'none', borderRadius: '4px', height: 'fit-content', minWidth: '60px' }}
                                             textToCopy={FEISHU_SYNC_PERM_JSON}
-                                            label="Copy"
-                                            copiedLabel="Copied✓"
+                                            label={t('common.copy')}
+                                            copiedLabel={t('common.copied') + '✓'}
                                         />
                                         {FEISHU_SYNC_PERM_JSON}
                                     </div>
@@ -642,15 +642,15 @@ function OrgTab({ tenant }: { tenant: any }) {
                 {type === 'oauth2' ? (
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                         <div className="form-group">
-                            <label className="form-label">Client ID</label>
+                            <label className="form-label">{t('enterprise.identity.clientId')}</label>
                             <input className="form-input" value={form.app_id} onChange={e => setForm({ ...form, app_id: e.target.value })} />
                         </div>
                         <div className="form-group">
-                            <label className="form-label">Client Secret</label>
+                            <label className="form-label">{t('enterprise.identity.clientSecret')}</label>
                             <input className="form-input" type="password" value={form.app_secret} onChange={e => setForm({ ...form, app_secret: e.target.value })} />
                         </div>
                         <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-                            <label className="form-label">Authorize URL</label>
+                            <label className="form-label">{t('enterprise.identity.authorizeUrl')}</label>
                             <input className="form-input" value={form.authorize_url} onChange={e => setForm({ ...form, authorize_url: e.target.value })} />
                         </div>
                     </div>
@@ -708,11 +708,11 @@ function OrgTab({ tenant }: { tenant: any }) {
                             <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{t('enterprise.identity.providerHints.dingtalk')}</div>
                         </div>
                         <div className="form-group">
-                            <label className="form-label">App Key</label>
+                            <label className="form-label">{t('enterprise.identity.appKey')}</label>
                             <input className="form-input" value={form.config.app_key || ''} onChange={e => setForm({ ...form, config: { ...form.config, app_key: e.target.value } })} placeholder="dingxxxxxxxxxxxx" />
                         </div>
                         <div className="form-group">
-                            <label className="form-label">App Secret</label>
+                            <label className="form-label">{t('enterprise.identity.appSecret')}</label>
                             <input className="form-input" type="password" value={form.config.app_secret || ''} onChange={e => setForm({ ...form, config: { ...form.config, app_secret: e.target.value } })} />
                         </div>
                     </div>
@@ -872,7 +872,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                         {t('enterprise.identity.title', 'Organization & Directory Sync')}
                     </h3>
                     <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                        Configure enterprise directory synchronization and Identity Provider settings.
+                        {t('enterprise.identity.description', 'Configure enterprise directory synchronization and Identity Provider settings.')}
                     </div>
                 </div>
 
@@ -897,7 +897,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
                                         {existingProvider ? (
                                             <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-end', gap: '8px' }}>
-                                                <span className="badge badge-success" style={{ fontSize: '10px' }}>Active</span>
+                                                <span className="badge badge-success" style={{ fontSize: '10px' }}>{t('enterprise.identity.active', 'Active')}</span>
                                                 {existingProvider.last_synced_at && (
                                                     <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>
                                                         Synced: {new Date(existingProvider.last_synced_at).toLocaleDateString()}
@@ -905,7 +905,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                                                 )}
                                             </div>
                                         ) : (
-                                            <span className="badge badge-secondary" style={{ fontSize: '10px' }}>Not configured</span>
+                                            <span className="badge badge-secondary" style={{ fontSize: '10px' }}>{t('enterprise.identity.notConfigured', 'Not configured')}</span>
                                         )}
                                         <div style={{ color: 'var(--text-tertiary)', transform: isExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s', fontSize: '12px' }}>
                                             ▼
@@ -992,9 +992,9 @@ function ThemeColorPicker() {
                     style={{ width: '120px', fontSize: '13px', fontFamily: 'var(--font-mono)' }}
                     onKeyDown={e => e.key === 'Enter' && handleCustom()}
                 />
-                <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={handleCustom}>Apply</button>
+                <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={handleCustom}>{t('common.apply', 'Apply')}</button>
                 {currentColor && (
-                    <button className="btn btn-ghost" style={{ fontSize: '12px', color: 'var(--text-tertiary)' }} onClick={handleReset}>Reset</button>
+                    <button className="btn btn-ghost" style={{ fontSize: '12px', color: 'var(--text-tertiary)' }} onClick={handleReset}>{t('common.reset', 'Reset')}</button>
                 )}
                 {currentColor && (
                     <div style={{ width: '20px', height: '20px', borderRadius: '4px', background: currentColor, border: '1px solid var(--border-default)' }} />
@@ -1630,7 +1630,7 @@ function CompanyTimezoneEditor() {
                     disabled={saving}
                 >
                     {COMMON_TIMEZONES.map(tz => (
-                        <option key={tz} value={tz}>{tz}</option>
+                        <option key={tz} value={tz}>{t(`enterprise.timezone.zones.${tz}`, tz)}</option>
                     ))}
                 </select>
                 {saved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>✅</span>}
@@ -2168,7 +2168,7 @@ export default function EnterpriseSettings() {
                                     {editingModelId === m.id ? (
                                         /* Inline edit form */
                                         <div className="card" style={{ border: '1px solid var(--accent-primary)' }}>
-                                            <h3 style={{ marginBottom: '16px' }}>Edit Model</h3>
+                                            <h3 style={{ marginBottom: '16px' }}>{t('enterprise.llm.editModel', 'Edit Model')}</h3>
                                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                                                 <div className="form-group">
                                                     <label className="form-label">{t('enterprise.llm.provider')}</label>
@@ -2307,7 +2307,7 @@ export default function EnterpriseSettings() {
                                                         transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
                                                     }} />
                                                 </button>
-                                                {m.supports_vision && <span className="badge" style={{ background: 'rgba(99,102,241,0.15)', color: 'rgb(99,102,241)', fontSize: '10px' }}>Vision</span>}
+                                                {m.supports_vision && <span className="badge" style={{ background: 'rgba(99,102,241,0.15)', color: 'rgb(99,102,241)', fontSize: '10px' }}>{t('enterprise.llm.vision', 'Vision')}</span>}
                                                 <button className="btn btn-ghost" onClick={() => {
                                                     setEditingModelId(m.id);
                                                     setModelForm({ provider: m.provider, model: m.model, label: m.label, base_url: m.base_url || '', api_key: m.api_key_masked || '', supports_vision: m.supports_vision || false, max_output_tokens: m.max_output_tokens ? String(m.max_output_tokens) : '', request_timeout: m.request_timeout ? String(m.request_timeout) : '', temperature: m.temperature !== null && m.temperature !== undefined ? String(m.temperature) : '' });
