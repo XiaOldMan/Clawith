@@ -38,6 +38,7 @@ dependencies = [
     "starlette-prometheus>=0.10.0",
     "slowapi>=0.1.9",
     "limits>=3.0.0",
+    "discord.py>=2.3.0",
 ]
 
 [project.optional-dependencies]

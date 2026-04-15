@@ -10,7 +10,9 @@ from datetime import datetime
 from loguru import logger
 
 # Context variable for trace ID
-trace_id_var: ContextVar[str] = ContextVar("trace_id", default="-")
+from uuid import uuid4
+
+trace_id_var: ContextVar[str] = ContextVar("trace_id", default=None)
 
 
 def get_trace_id() -> str:
@@ -48,7 +50,7 @@ def json_formatter(record):
 
 
 def configure_logging():
-    """Configure loguru with JSON format including trace ID."""
+    """Configure loguru with custom format including trace ID."""
     # Remove default handler
     logger.remove()
 
@@ -66,20 +68,19 @@ def configure_logging():
             enqueue=True,
             backtrace=True,
             diagnose=True,
+            filter=lambda record: (record["extra"].setdefault("trace_id", get_trace_id() or str(uuid4())) is not None)
         )
     else:
         # Add stdout handler with text format (including trace ID)
         logger.add(
             sys.stdout,
             level="INFO",
-            format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{extra[trace_id]: <12}</cyan> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+            format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{extra[trace_id]:-<12}</cyan> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
             enqueue=True,
             backtrace=True,
             diagnose=True,
+            filter=lambda record: (record["extra"].setdefault("trace_id", get_trace_id() or str(uuid4())) is not None)
         )
-
-    # Patch the default logger to include trace_id in extra
-    logger.patch(lambda record: record["extra"].update(trace_id=get_trace_id()))
 
     return logger
 
@@ -112,4 +113,4 @@ def intercept_standard_logging():
 
 
 # Configure on import
-configure_logging()
+logger = configure_logging()

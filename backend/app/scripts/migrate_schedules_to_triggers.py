@@ -10,7 +10,8 @@ import asyncio
 import uuid
 from datetime import datetime, timezone
 
-from loguru import logger
+import logging
+logger = logging.getLogger(__name__)
 from sqlalchemy import select
 
 from app.database import async_session
@@ -55,8 +56,11 @@ async def migrate():
                 last_fired_at=s.last_run_at,
             )
             db.add(trigger)
+            # Disable the source schedule so it won't be re-migrated
+            # if the user deletes the trigger and this script runs again
+            s.is_enabled = False
             migrated += 1
-            logger.info(f"  Migrated: '{s.name}' → cron({s.cron_expr})")
+            logger.info(f"  Migrated: '{s.name}' -> cron({s.cron_expr})")
 
         await db.commit()
         logger.info(f"Migration complete: {migrated} migrated, {skipped} skipped")
